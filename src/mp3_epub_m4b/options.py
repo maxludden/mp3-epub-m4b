@@ -43,6 +43,8 @@ class Options:
         readaloud: Alignment settings for the readaloud stage; ``None`` skips it.
         evict: Evict the source audio from local disk afterwards (iCloud Drive only).
         verify: Probe the finished M4B and report chapters, duration and streams.
+        align_by: How chapters are placed in the audio (silence or transcript).
+        whisper_model: GGML model for transcript placement (default: found automatically).
     """
 
     work_dir: Path
@@ -58,6 +60,8 @@ class Options:
     readaloud: AlignOptions | None = None
     evict: bool = False
     verify: bool = True
+    align_by: str = "silence"
+    whisper_model: Path | None = None
 
 
 class Granularity(StrEnum):
@@ -65,6 +69,14 @@ class Granularity(StrEnum):
 
     sentence = "sentence"
     word = "word"
+
+
+class AlignMode(StrEnum):
+    """How chapter boundaries are located in the audio."""
+
+    silence = "silence"
+    transcribe = "transcribe"
+    auto = "auto"
 
 
 class Device(StrEnum):
@@ -87,6 +99,24 @@ class Codec(StrEnum):
     libmp3lame = "libmp3lame"
 
 
+AlignBy = Annotated[
+    AlignMode,
+    typer.Option(
+        "--align-by",
+        help="How chapters are placed: at detected silences; by finding each chapter's "
+        "opening words in a whisper.cpp transcript (slower, for recordings with no pause "
+        "between chapters); or auto: silence first, then transcript if silence looks unreliable.",
+    ),
+]
+WhisperModel = Annotated[
+    Path | None,
+    typer.Option(
+        "--whisper-model",
+        dir_okay=False,
+        envvar="MP3_EPUB_M4B_WHISPER_MODEL",
+        help="GGML model file for --align-by transcribe (default: found in ~/.cache).",
+    ),
+]
 OutDir = Annotated[
     Path | None,
     typer.Option(

@@ -11,6 +11,8 @@ import shutil
 from pathlib import Path
 
 from loguru import logger
+from rich.console import Group
+from rich.live import Live
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -21,6 +23,7 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.text import Text
 
 from mp3_epub_m4b import icloud
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError
@@ -196,6 +199,8 @@ def run_pipeline(
         outro_max_tail=o.outro_max_tail,
         overwrite=o.overwrite,
         readaloud=None if stop_at else o.readaloud,
+        align_by=o.align_by,
+        whisper_model=o.whisper_model,
     )
     stages = pipeline.stages[: pipeline.stages.index(stop_at)] if stop_at else pipeline.stages
 
@@ -203,7 +208,7 @@ def run_pipeline(
         stage = pipeline.state["stage"]
         return stage == "done" or (stop_at is not None and STAGES.index(stage) >= len(stages))
 
-    with Progress(
+    progress = Progress(
         SpinnerColumn(),
         TextColumn("[bold]{task.description:<16}"),
         BarColumn(),
@@ -211,7 +216,11 @@ def run_pipeline(
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
-    ) as progress:
+    )
+    # what the pipeline is doing right now, on its own line under the bars so a
+    # long description never squeezes them
+    now_line = Text("", style="#00aaff", no_wrap=True, overflow="ellipsis")
+    with Live(Group(progress, now_line), console=console, refresh_per_second=4):
         overall = progress.add_task("overall", total=len(stages))
         tasks: dict[str, TaskID] = {}
 
@@ -223,7 +232,15 @@ def run_pipeline(
                     tasks[stage], completed=int(done / 60), total=max(1, int(total / 60))
                 )
 
+        def on_status(detail: str, done: float | None, total: float | None) -> None:
+            """Show the pipeline's latest status line and, when given, advance the stage's bar."""
+            now_line.plain = detail
+            stage = pipeline.state["stage"]
+            if stage in tasks and done is not None and total:
+                progress.update(tasks[stage], completed=done, total=total)
+
         pipeline.on_progress = on_progress
+        pipeline.on_status = on_status
 
         while not finished():
             stage = pipeline.state["stage"]
@@ -242,5 +259,6 @@ def run_pipeline(
             else:
                 progress.update(tasks[stage], total=1, completed=1)
                 progress.update(overall, completed=pipeline.stages.index(stage) + 1)
+        now_line.plain = ""
 
     return pipeline.state

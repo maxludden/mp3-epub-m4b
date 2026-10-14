@@ -3,9 +3,10 @@
 # mp3+epub=m4b
 
 Turns a single-file audiobook (`.mp3` / `.m4a`) plus its EPUB into a chaptered
-`.m4b` with accurate chapter boundaries (detected from silence gaps in the audio,
-anchored chapter-by-chapter so they can't drift), embedded cover art, and
-optionally the opening/end credits split into their own chapters.
+`.m4b` with accurate chapter boundaries (found from silence gaps in the audio or, when
+chapters aren't separated by a pause, from where each chapter's opening words are spoken;
+anchored chapter-by-chapter so they can't drift), embedded cover art, and optionally the
+opening/end credits split into their own chapters.
 
 ## Requirements
 
@@ -13,6 +14,9 @@ optionally the opening/end credits split into their own chapters.
   the Python CLI itself only needs the tools below, so it should work anywhere they do)
 - [ffmpeg](https://ffmpeg.org) (with `ffprobe`)
 - [uv](https://docs.astral.sh/uv/) and Python 3.12+
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (`brew install whisper-cpp`) and a GGML
+  model such as `ggml-base.en.bin`, optional: only for recordings with no pause between
+  chapters (`--align-by transcribe`)
 - Node 24+, only for the readaloud EPUB step (`--no-readaloud` skips it)
 
 ## Setup
@@ -121,6 +125,15 @@ drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
   iCloud Drive (macOS). Evicted sources are always downloaded first, automatically.
 - `--detect-intro` / `--detect-outro` — split opening / end credits into their own
   chapters. Off by default: auto-detection can misfire, and a false positive shifts every
+- `--align-by auto|silence|transcribe` — how chapters are placed. `auto` (the default) tries
+  silence first and switches to `transcribe` when silence fails or looks unreliable (chapters
+  placed by guess, or many far from the length their word count predicts). `transcribe`
+  listens instead: it transcribes a window around where each chapter should start and finds
+  the chapter's opening words (epigraph included) in it, so it works when nothing separates
+  chapters. It needs whisper.cpp and takes roughly 15 minutes for a 20-hour book. `silence`
+  never transcribes. Without whisper.cpp, `auto` behaves exactly like `silence`.
+- `--whisper-model` — GGML model for `transcribe` (default: the first `ggml-*.en.bin` in
+  `~/.cache/whisper-models` or `~/.cache/whisper.cpp`; also `MP3_EPUB_M4B_WHISPER_MODEL`).
   later chapter, so check the result with `--dry-run`.
 - `--min-gap`, `--bitrate`, `--overwrite`, `--fresh` — see `--help`.
 - `--readaloud / --no-readaloud` — after delivery, align the M4B with the EPUB into an
@@ -143,6 +156,12 @@ drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
   silent when the package is imported as a library until you call
   `logger.enable("mp3_epub_m4b")`.
 - The audio is scanned for silences once (cached), chapters are placed in memory, and the
+- **Checking on a long run.** While a book converts, the progress bars show a line under
+  them saying what is happening (for example, which stretch of audio is being listened to).
+  From another terminal, `mp3-epub-m4b status` reports every book in the work folder:
+  stage checklist, chapters placed, speed, time left and whether the process is still alive.
+  Give it an audio file or a work folder for one book, and add `--watch` to keep it
+  refreshing until nothing is running.
   M4B is encoded in a single pass, so chapter joins are gapless.
 
 ## Troubleshooting
@@ -153,6 +172,14 @@ break) can look like a boundary. Run `--dry-run` and look for rows marked
 `low-confidence`; try `--min-gap` (lower to catch shorter transitions, higher to ignore
 scene breaks) with `--fresh`. If the credits at the start or end are the culprit, toggle
 `--detect-intro` / `--detect-outro`.
+**Chapters placed by guess, "ran out of audio", or many lengths far from the word counts.**
+The recording may have no pause between chapters: some are joined by music, a spoken "Part 2
+of 3", or nothing at all, so silence can't find them. With whisper.cpp installed,
+`--align-by auto` (the default) notices and switches to transcript placement by itself; you
+can also force it with `--align-by transcribe --fresh`. In the `--dry-run` table, rows noted
+`unmatched` are chapters whose opening words were never heard: they are placed by
+interpolation, so check them against the audio.
+
 
 **"output is Ns but the source is Ms" / `verify: duration is ...`.** The encode and the
 source should match within about 3 seconds. A larger difference usually means the encode
@@ -166,7 +193,8 @@ output. A warning that the average chapter length is implausible means the EPUB 
 isn't the right one for this audio.
 
 **Alignment fails ("ran out of audio", "would start at the very end", or a readaloud
-error).** The EPUB has more chapters than the audio, or the two are different editions.
+error).** The EPUB has more chapters than the audio, or the two are different editions
+(if the audio has no pause between chapters, see the entry above).
 For a readaloud failure the M4B is already delivered; fix the cause (Node 24+, enough
 disk) and re-run to resume at the alignment, or pass `--no-readaloud`.
 
@@ -175,16 +203,18 @@ settings. Re-run with the original settings, or add `--fresh`.
 
 ## Layout
 
-- `cli.py` — Typer CLI (`convert`, `batch`, `stalign`); `options.py` — shared option definitions;
+- `cli.py` — Typer CLI (`convert`, `batch`, `stalign`, `status`); `options.py` — shared option definitions;
   `converter.py` — runs one book with progress bars; `pairing.py` — matches audio to EPUBs
 - `run.py` — the resumable pipeline (stages: extract, scan, align, assemble, deliver, readaloud)
 - `state.py` — checkpoint types, fingerprint and persistence
+- `transcribe.py` — transcript-based placement: opening-word matching and whisper.cpp windows
+- `status.py` — progress record and the `status` report; `log.py` — logging and highlighting
 - `chapters.py` — chapter placement from the silence scan, segments, chapter metadata
 - `epub_extract.py` — EPUB metadata, chapters, word counts and cover
 - `ffmpeg_tools.py` — ffmpeg/ffprobe helpers (silence scan, probing)
 - `report.py` — chapter table and output verification
 - `icloud.py` — iCloud Drive download/evict (macOS)
-- `align.py` — readaloud alignment wrapper; `log.py` — logging setup
+- `align.py` — readaloud alignment wrapper
 
 ## Development
 
