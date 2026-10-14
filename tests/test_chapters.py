@@ -162,3 +162,35 @@ def test_find_gap_and_build_segments_log_their_decisions() -> None:
     assert any("gap at 102.0s" in m for m in messages)
     assert any("no gap found after 150.0s" in m for m in messages)
     assert any("built 3 segments" in m for m in messages)
+
+
+def test_build_segments_marks_unmatched_chapters() -> None:
+    segs = build_segments(
+        CHAPTERS,
+        {"1": 0.0, "2": 100.0},
+        total_dur=200.0,
+        outro_start=None,
+        intro_title="Intro",
+        outro_title="Outro",
+        low_confidence=[1, 2],
+        unmatched=[2],
+    )
+    assert [s.get("note") for s in segs] == ["low-confidence", "unmatched"]
+
+
+def test_silence_doubts_on_the_real_book_numbers() -> None:
+    from mp3_epub_m4b.chapters import silence_doubts
+
+    # The Final Empire by silence: 9 guessed placements, 26 of 40 chapters off-length.
+    assert "9 of 40 chapters had no clear silence" in (
+        silence_doubts(40, list(range(2, 11)), 26) or ""
+    )
+    # Even without guesses, 26 of 40 off-length means boundaries were missed.
+    assert "26 of 40" in (silence_doubts(40, [], 26) or "")
+    # Two guesses are enough: a guess is a fixed 15-minute offset, not evidence.
+    assert silence_doubts(40, [5, 6], 0) is not None
+    # A sound placement (also what transcript alignment gave: 2 of 40 off-length) is trusted.
+    assert silence_doubts(40, [], 2) is None
+    assert silence_doubts(40, [7], 8) is None  # one guess and 20% off-length is tolerated
+    # A tiny book's deviation share means nothing.
+    assert silence_doubts(3, [], 3) is None

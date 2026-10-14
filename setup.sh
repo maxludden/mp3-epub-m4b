@@ -21,6 +21,6 @@ fi
 UV_PROJECT_ENVIRONMENT="$VENV" uv sync --project "$KIT_DIR" --no-dev || exit 1
 "$VENV/bin/mp3-epub-m4b" --help >/dev/null || { echo "install check failed"; exit 1; }
 # Install the aligner into ~/.mp3-epub-m4b-align now (no-op if already there).
-"$VENV/bin/python" -c "from mp3_epub_m4b.stalign import ensure_installed, find_node; ensure_installed(find_node())" \
+"$VENV/bin/python" -c "from mp3_epub_m4b.align import ensure_installed, find_node; ensure_installed(find_node())" \
   || { echo "aligner install failed"; exit 1; }
 echo "ready — try: ./convert.sh <audio> [epub]"

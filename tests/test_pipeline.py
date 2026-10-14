@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from mp3_epub_m4b import transcribe
 from mp3_epub_m4b.align import AlignError, AlignOptions
 from mp3_epub_m4b.ffmpeg_tools import scan_silences
 from mp3_epub_m4b.run import Pipeline
@@ -330,7 +332,8 @@ def test_cli_defaults_and_slice_validation() -> None:
     from mp3_epub_m4b.cli import app
 
     result = CliRunner().invoke(app, ["convert", __file__, __file__, "--slice-seconds", "0"])
-    assert result.exit_code != 0 and "slice-seconds" in result.output.lower().replace("_", "-")
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)  # CI forces colour, splitting option names
+    assert result.exit_code != 0 and "slice-seconds" in plain.lower().replace("_", "-")
     import typer.main
 
     for name in ("convert", "batch"):
@@ -371,3 +374,246 @@ def test_deliver_never_overwrites_without_the_flag(tmp_path: Path) -> None:
         p.stage_deliver(5.0)
     assert (out / "Book.m4b").read_bytes() == b"existing"
     assert p.state["stage"] == "deliver"  # nothing advanced
+
+
+def fake_whisper(monkeypatch, starts: dict[int, float], openings: dict[int, str], skip=()) -> None:
+    """Replace whisper with a synthetic timeline: chapter ``i`` is spoken from ``starts[i]``."""
+    from mp3_epub_m4b import run
+
+    monkeypatch.setattr(run, "find_whisper", lambda model=None: ("whisper", Path("m.bin")))
+
+    def window(audio, start, duration, **kw):
+        words = []
+        for i, t in starts.items():
+            if i in skip:
+                continue
+            for k, w in enumerate(openings[i].split()):
+                at = t + k * 0.4
+                if start <= at <= start + duration:
+                    words.append(transcribe.Word(at, at + 0.4, w))
+        return sorted(words)
+
+    monkeypatch.setattr(run, "transcribe_window", window)
+
+
+OPENING_BANK = [
+    "amber falcons circle above the quiet harbor lanterns while fishermen mend their nets",
+    "violet quarries echo beneath a frozen cathedral as the bells announce another winter",
+    "crimson orchards whisper through hollow granite corridors where nobody remembers walking",
+    "silver tempests gather behind distant marble archways and scatter the sleeping pigeons",
+    "gentle mechanics repair the clockwork river before sunrise paints the copper bridges",
+]
+
+
+def prime_transcribe(p: Pipeline, words: list[int], total: float) -> dict[int, str]:
+    """Prepare a transcribe-mode align stage; return each chapter's (distinct) opening text."""
+    prime_align(p, [], words, total)
+    openings = {i: OPENING_BANK[i - 1] for i in range(1, len(words) + 1)}
+    for c in p._epub()["chapters"]:
+        c["opening"] = openings[c["n"]]
+    return openings
+
+
+def test_align_by_transcript_places_chapters_at_the_spoken_openings(
+    tmp_path: Path, monkeypatch
+) -> None:
+    p = make_pipeline(tmp_path, align_by="transcribe")
+    words = [1000, 1000, 1000, 1000]
+    openings = prime_transcribe(p, words, 4000.0)
+    starts = {1: 10.0, 2: 1050.0, 3: 2010.0, 4: 3100.0}  # word counts are only roughly right
+    fake_whisper(monkeypatch, starts, openings)
+    assert p.stage_align(600) is True
+    b = p._align()["boundaries"]
+    for i, t in starts.items():
+        assert t - 1.5 <= b[str(i)] <= t  # cut just before the first word
+    assert p._align().get("unmatched") == []
+    assert [s.get("note", "") for s in p._segments() if "words" in s] == ["", "", "", ""]
+
+
+def test_align_by_transcript_interpolates_and_flags_an_unheard_chapter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    p = make_pipeline(tmp_path, align_by="transcribe")
+    words = [1000, 1000, 1000, 1000]
+    openings = prime_transcribe(p, words, 4000.0)
+    starts = {1: 0.0, 2: 1000.0, 3: 2000.0, 4: 3000.0}
+    fake_whisper(monkeypatch, starts, openings, skip=(3,))
+    assert p.stage_align(600) is True
+    align = p._align()
+    assert align["unmatched"] == [3]
+    assert align["boundaries"]["3"] == pytest.approx(2000.0, abs=5.0)  # between chapters 2 and 4
+    assert 1000.0 < align["boundaries"]["3"] < align["boundaries"]["4"]
+    notes = {s["title"]: s.get("note") for s in p._segments()}
+    assert notes["Ch3"] == "unmatched" and notes["Ch2"] in ("", None)
+
+
+def test_align_by_transcript_resumes_within_budget(tmp_path: Path, monkeypatch) -> None:
+    p = make_pipeline(tmp_path, align_by="transcribe")
+    openings = prime_transcribe(p, [1000, 1000, 1000], 3000.0)
+    fake_whisper(monkeypatch, {1: 0.0, 2: 1000.0, 3: 2000.0}, openings)
+    assert p.stage_align(0) is False  # no budget: nothing placed, nothing lost
+    assert p._align()["next"] == 1
+    assert p.stage_align(600) is True
+
+
+def test_transcribe_mode_is_part_of_the_fingerprint_only_when_enabled(tmp_path: Path) -> None:
+    default = make_pipeline(tmp_path)
+    assert "align_by" not in default._fingerprint()  # old checkpoints keep resuming
+    other = tmp_path / "t"
+    other.mkdir()
+    transcribing = make_pipeline(other, align_by="transcribe", whisper_model=Path("x/ggml.bin"))
+    assert transcribing._fingerprint()["align_by"] == "transcribe"
+    assert transcribing._fingerprint()["whisper_model"] == "ggml.bin"
+    with pytest.raises(ValueError, match="align_by"):
+        make_pipeline(other, align_by="nope")
+
+
+def test_align_by_transcript_widens_the_window_for_a_chapter_far_from_its_estimate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    p = make_pipeline(tmp_path, align_by="transcribe")
+    openings = prime_transcribe(p, [1000, 1000, 1000], 6000.0)
+    # chapter 3 is spoken ~600 s after the word counts predict, beyond the first two windows
+    fake_whisper(monkeypatch, {1: 0.0, 2: 1000.0, 3: 2600.0}, openings)
+    assert p.stage_align(600) is True
+    assert p._align()["unmatched"] == []
+    assert 2598.0 <= p._align()["boundaries"]["3"] <= 2600.0
+
+
+def test_alignment_reports_status_per_chapter_and_writes_a_progress_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mp3_epub_m4b.status import PROGRESS_FILE, read_progress
+
+    p = make_pipeline(tmp_path, align_by="transcribe")
+    openings = prime_transcribe(p, [1000, 1000, 1000], 3000.0)
+    fake_whisper(monkeypatch, {1: 0.0, 2: 1000.0, 3: 2000.0}, openings)
+    seen: list[tuple[str, float | None, float | None]] = []
+    p.on_status = lambda detail, done, total: seen.append((detail, done, total))
+    assert p.stage_align(600) is True
+    details = [d for d, _done, _total in seen]
+    assert any("listening" in d and "attempt 1/3" in d for d in details)
+    assert any(d.startswith("chapter 2/3 heard at") for d in details)
+    assert seen[-1][1:] == (3, 3)
+    rec = read_progress(p.work_dir / PROGRESS_FILE)
+    assert rec is not None
+    assert (rec["stage"], rec["done"], rec["total"], rec["unit"]) == ("align", 3, 3, "chapters")
+    assert "heard at" in rec["detail"]
+
+
+def test_silence_alignment_reports_each_chapter_too(tmp_path: Path) -> None:
+    p = make_pipeline(tmp_path)
+    prime_align(p, [(100.0, 104.0), (105.0, 107.0)], [1000, 1000], 200.0)
+    seen: list[str] = []
+    p.on_status = lambda detail, done, total: seen.append(detail)
+    p.stage_align(60)
+    assert [d.split(" placed")[0] for d in seen] == ["chapter 2/2"]  # chapter 1 starts the book
+
+
+def silence_only_book(p: Pipeline, words: list[int], total: float) -> dict[int, str]:
+    """A transcribe-ready book with an empty silence scan, so silence placement can only guess."""
+    return prime_transcribe(p, words, total)
+
+
+def test_auto_keeps_a_clean_silence_placement_and_never_transcribes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mp3_epub_m4b import run
+
+    def never(*a, **k):
+        raise AssertionError("transcription must not run for a clean silence placement")
+
+    monkeypatch.setattr(run, "transcribe_window", never)
+    p = make_pipeline(tmp_path, align_by="auto")
+    prime_align(p, [(100.0, 104.0), (105.0, 107.0)], [1000, 1000], 200.0)
+    assert p.stage_align(60) is True
+    assert p._align()["method"] == "silence" and p.state["stage"] == "assemble"
+
+
+def test_auto_switches_to_transcript_when_silence_falls_back_to_guesses(
+    tmp_path: Path, monkeypatch, logs: list[tuple[str, str]]
+) -> None:
+    p = make_pipeline(tmp_path, align_by="auto")
+    openings = silence_only_book(p, [1000, 1000, 1000], 3000.0)  # no silences: all guesses
+    fake_whisper(monkeypatch, {1: 0.0, 2: 1000.0, 3: 2000.0}, openings)
+    assert p.stage_align(60) is False  # switched; the transcript pass runs next
+    align = p._align()
+    assert align["method"] == "transcribe" and align["boundaries"] == {} and align["fallback"] == []
+    assert align["next"] == 1 and "outro_start" not in align and "segments" not in p.state
+    assert any(
+        "switching to transcript alignment" in m and "placed by guess" in m for _l, m in logs
+    )
+    assert p.stage_align(600) is True
+    assert 1998.0 <= p._align()["boundaries"]["3"] <= 2000.0
+    assert p.stage_align(600) is True or p.state["stage"] == "assemble"
+
+
+def test_auto_switches_when_silence_cannot_place_every_chapter(tmp_path: Path, monkeypatch) -> None:
+    p = make_pipeline(tmp_path, align_by="auto")
+    openings = silence_only_book(p, [100, 100, 100], 1000.0)  # the 3rd guess runs past the end
+    fake_whisper(monkeypatch, {1: 0.0, 2: 300.0, 3: 600.0}, openings)
+    assert p.stage_align(60) is False
+    assert p._align()["method"] == "transcribe"
+    assert p.stage_align(600) is True and p._align()["unmatched"] == []
+
+
+def test_a_checkpoint_switched_to_transcript_resumes_as_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    p = make_pipeline(tmp_path, align_by="auto")
+    openings = silence_only_book(p, [1000, 1000, 1000], 3000.0)
+    fake_whisper(monkeypatch, {1: 0.0, 2: 1000.0, 3: 2000.0}, openings)
+    p.stage_align(60)  # switches
+    again = make_pipeline(tmp_path, align_by="auto")  # same work folder, new process
+    assert again._align()["method"] == "transcribe"
+    assert again.stage_align(600) is True
+
+
+def test_auto_without_whisper_behaves_like_silence(
+    tmp_path: Path, monkeypatch, logs: list[tuple[str, str]]
+) -> None:
+    from mp3_epub_m4b import run
+
+    def missing(model=None):
+        raise transcribe.WhisperError("whisper.cpp not found on PATH")
+
+    monkeypatch.setattr(run, "find_whisper", missing)
+    # doubtful but complete: keep the guesses and warn
+    p = make_pipeline(tmp_path, align_by="auto")
+    silence_only_book(p, [1000, 1000, 1000], 3000.0)
+    assert p.stage_align(60) is True and p.state["stage"] == "assemble"
+    assert p._align()["method"] == "silence"
+    assert any("silence placement is kept" in m for _l, m in logs)
+    # a failure: the original error, plus why transcript alignment wasn't tried
+    other = tmp_path / "o"
+    other.mkdir()
+    q = make_pipeline(other, align_by="auto")
+    silence_only_book(q, [100, 100, 100], 1000.0)
+    with pytest.raises(RuntimeError, match="end of the audio|ran out of audio") as err:
+        q.stage_align(60)
+    assert "could not be tried" in str(err.value) and "whisper.cpp not found" in str(err.value)
+
+
+def test_explicit_silence_failure_suggests_transcript_alignment(tmp_path: Path) -> None:
+    p = make_pipeline(tmp_path, align_by="silence")
+    prime_align(p, [], [100, 100, 100], 1000.0)
+    with pytest.raises(RuntimeError, match="try --align-by transcribe"):
+        p.stage_align(60)
+
+
+def test_explicit_silence_refuses_a_checkpoint_aligned_by_transcript(tmp_path: Path) -> None:
+    p = make_pipeline(tmp_path, align_by="silence")
+    prime_align(p, [], [100, 100], 1000.0)
+    p._align()["method"] = "transcribe"
+    with pytest.raises(StateMismatchError, match="--fresh"):
+        p.stage_align(60)
+
+
+def test_auto_and_silence_share_a_fingerprint_so_old_checkpoints_still_resume(
+    tmp_path: Path,
+) -> None:
+    old = make_pipeline(tmp_path)  # silence, as every earlier version
+    assert "align_by" not in old._fingerprint()
+    resumed = make_pipeline(tmp_path, align_by="auto")  # the new CLI default
+    assert resumed._fingerprint() == old._fingerprint()
+    assert resumed.state["stage"] == "extract"

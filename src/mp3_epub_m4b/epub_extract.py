@@ -22,7 +22,7 @@ import warnings
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, NamedTuple, TypedDict
+from typing import Annotated, NamedTuple, NotRequired, TypedDict
 from urllib.parse import unquote
 
 import typer
@@ -47,11 +47,18 @@ class EpubMeta(TypedDict):
 
 
 class Chapter(TypedDict):
-    """One detected chapter: its number, title and word count."""
+    """One detected chapter: its number, title and word count.
+
+    ``opening`` is the first words a narrator reads, including a leading
+    epigraph; ``body_opening`` is the same without the epigraph and is only
+    present when there is one. Both are absent in checkpoints from older versions.
+    """
 
     n: int
     title: str
     word_count: int
+    opening: NotRequired[str]
+    body_opening: NotRequired[str]
 
 
 class EpubResult(TypedDict):
@@ -94,6 +101,7 @@ FRONT_BACK_MATTER_EXACT = frozenset(
         "maps",
         "glossary",
         "appendix",
+        "ars arcanum",
         "preview",
         "discord",
         "newsletter",
@@ -110,9 +118,14 @@ FRONT_BACK_MATTER_PREFIXES = (
     "thank you for reading",
     "sneak peek",
     "preview of",
+    "special preview",
     "table of contents",
     "copyright",
 )
+
+OPENING_WORDS = 40  # how much of a chapter's start to keep for transcript matching
+LEAD_MIN_WORDS = 15  # shorter files are stubs ("PART THREE"), not narrated epigraphs
+LEAD_MAX_WORDS = 200  # at or above this a file is a chapter in its own right
 
 NUMBERED_RE = re.compile(r"^\s*(?:chapter\s+)?(\d+)\s*[\.\):\-–—]\s*(.+?)\s*$", re.I)
 
@@ -131,6 +144,43 @@ def _is_front_back_matter(heading: str) -> bool:
     """Return whether ``heading`` looks like front/back matter (see the blocklist constants)."""
     h = _normalize_heading(heading)
     return h in FRONT_BACK_MATTER_EXACT or h.startswith(FRONT_BACK_MATTER_PREFIXES)
+
+
+def _opening_text(path: Path) -> str:
+    """The first ``OPENING_WORDS`` words of body text in an XHTML file (headings left out)."""
+    soup = _soup(_read(path))
+    body = soup.body or soup
+    for h in body.find_all(["h1", "h2", "h3"]):
+        h.decompose()
+    return " ".join(body.get_text(" ", strip=True).split()[:OPENING_WORDS])
+
+
+def _lead_in(base: Path, spine_hrefs: list[str], idx: int) -> str:
+    """Opening text of a short epigraph file directly before spine item ``idx``.
+
+    Many books split a chapter into a heading-less epigraph file followed by
+    the numbered file. A narrator reads the epigraph first, so it is where the
+    chapter starts in the audio. Returns ``""`` when the previous file is a
+    stub, a full chapter, or front/back matter.
+    """
+    if idx < 1:
+        return ""
+    prev = base / spine_hrefs[idx - 1]
+    if not prev.exists():
+        return ""
+    heading, words = _chapter_word_count(prev)
+    if not LEAD_MIN_WORDS <= words < LEAD_MAX_WORDS or (heading and _is_front_back_matter(heading)):
+        return ""
+    return _opening_text(prev)
+
+
+def _with_openings(chapter: Chapter, lead: str, body: str) -> Chapter:
+    """Attach ``opening`` (and ``body_opening`` if ``lead`` is non-empty) to ``chapter``."""
+    if body or lead:
+        chapter["opening"] = f"{lead} {body}".strip() if lead else body
+    if lead and body:
+        chapter["body_opening"] = body
+    return chapter
 
 
 def _read(path: Path) -> str:
@@ -444,7 +494,19 @@ def _extract_chapters_via_toc(
             if j > 0 and heading and _is_front_back_matter(heading):
                 break
             wc += w
-        chapters.append({"n": n, "title": title, "word_count": wc})
+        body = next(
+            (
+                _opening_text(base / h)
+                for h in spine_hrefs[start_idx:end_idx]
+                if (base / h).exists() and _chapter_word_count(base / h)[1] >= LEAD_MIN_WORDS
+            ),
+            "",
+        )
+        # an epigraph file directly before the entry belongs to this chapter,
+        # unless the previous entry starts there (then it is that chapter's body)
+        own_lead = i > 0 and deduped[i - 1][2] < start_idx - 1
+        lead = _lead_in(base, spine_hrefs, start_idx) if own_lead else ""
+        chapters.append(_with_openings({"n": n, "title": title, "word_count": wc}, lead, body))
 
     chapters.sort(key=lambda c: c["n"])
     return chapters
@@ -456,24 +518,34 @@ def _extract_chapters_via_blocklist(
     """Fallback chapter detection: every spine file that isn't front/back matter.
 
     Skips the title page, blocklisted headings and files under 200 words, and
-    numbers the rest sequentially from 1.
+    numbers the rest sequentially from 1. Stops at the first blocklisted heading
+    after a chapter, so trailing previews and ads are not counted.
     """
+    hrefs = [manifest[idref].href for idref in spine if idref in manifest]
     chapters: list[Chapter] = []
     n = 0
-    for idref in spine:
-        item = manifest.get(idref)
-        if item is None:
-            continue
-        p = base / item.href
+    for idx, href in enumerate(hrefs):
+        p = base / href
         if not p.exists() or p.name == "titlepage.xhtml":
             continue
         heading, wc = _chapter_word_count(p)
         if _is_front_back_matter(heading):
+            if chapters:  # back matter after the story: whatever follows is a sample or ad
+                break
             continue
         if wc < 200:  # too short to plausibly be real chapter content
             continue
         n += 1
-        chapters.append({"n": n, "title": heading or f"Chapter {n}", "word_count": wc})
+        # never borrow a lead-in for the first chapter: what precedes it is
+        # usually praise quotes or a dedication, which are not narrated
+        lead = _lead_in(base, hrefs, idx) if chapters else ""
+        chapters.append(
+            _with_openings(
+                {"n": n, "title": heading or f"Chapter {n}", "word_count": wc},
+                lead,
+                _opening_text(p),
+            )
+        )
     return chapters
 
 

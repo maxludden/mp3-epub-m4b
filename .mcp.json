@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mp3-epub-m4b": {
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/maxludden/dev/py/mp3-epub-m4b", "mp3-epub-m4b-mcp"]
+    }
+  }
+}

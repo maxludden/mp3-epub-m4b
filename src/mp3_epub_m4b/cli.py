@@ -4,6 +4,7 @@
     mp3-epub-m4b convert book.mp3             # finds book.epub beside it
     mp3-epub-m4b batch "/path/to/series folder"
     mp3-epub-m4b stalign book.m4b book.epub
+    mp3-epub-m4b status --watch               # progress of a running conversion
 
 The commands only parse options and pick files; :mod:`mp3_epub_m4b.converter`
 runs the resumable pipeline (re-running a command after an interruption resumes
@@ -14,11 +15,13 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from loguru import logger
+from rich.live import Live
 
 from mp3_epub_m4b.align import AlignError, AlignOptions, align_book
 from mp3_epub_m4b.converter import convert_book, low_space, plan_book
@@ -28,8 +31,10 @@ from mp3_epub_m4b.options import (
     DEFAULT_EPUB_PATTERN,
     DEFAULT_WORK,
     MIN_FREE_GB,
+    AlignBy,
     AlignDevice,
     AlignLanguage,
+    AlignMode,
     AudioPattern,
     Bitrate,
     Codec,
@@ -50,11 +55,14 @@ from mp3_epub_m4b.options import (
     Readaloud,
     SliceSeconds,
     Verify,
+    WhisperModel,
     WorkDir,
     Yes,
 )
-from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
+from mp3_epub_m4b.pairing import find_epub, pair_folder
 from mp3_epub_m4b.report import chapter_table, pairs_table
+from mp3_epub_m4b.run import work_name
+from mp3_epub_m4b.status import BookStatus, build_view, read_all_status, read_status
 
 app = typer.Typer(
     help="Convert audiobooks (mp3/m4a) plus EPUBs into chaptered M4B files.",
@@ -87,6 +95,8 @@ def _build_options(
     align_language: str,
     evict: bool,
     verify: bool,
+    align_by: AlignMode,
+    whisper_model: Path | None,
 ) -> Options:
     """Assemble the :class:`Options` shared by ``convert`` and ``batch`` from their CLI flags."""
     return Options(
@@ -103,6 +113,8 @@ def _build_options(
         _readaloud_options(readaloud, align_device, align_language),
         evict,
         verify,
+        align_by.value,
+        whisper_model,
     )
 
 
@@ -139,6 +151,8 @@ def convert(
     align_device: AlignDevice = None,
     align_language: AlignLanguage = "en-US",
     verify: Verify = True,
+    align_by: AlignBy = AlignMode.auto,
+    whisper_model: WhisperModel = None,
     evict: Evict = False,
     dry_run: DryRun = False,
 ) -> None:
@@ -166,6 +180,8 @@ def convert(
         align_language=align_language,
         evict=evict,
         verify=verify,
+        align_by=align_by,
+        whisper_model=whisper_model,
     )
     try:
         epub = epub or find_epub(audio)
@@ -218,6 +234,8 @@ def batch(
     align_device: AlignDevice = None,
     align_language: AlignLanguage = "en-US",
     verify: Verify = True,
+    align_by: AlignBy = AlignMode.auto,
+    whisper_model: WhisperModel = None,
     evict: Evict = False,
     dry_run: DryRun = False,
     yes: Yes = False,
@@ -246,18 +264,18 @@ def batch(
         align_language=align_language,
         evict=evict,
         verify=verify,
+        align_by=align_by,
+        whisper_model=whisper_model,
     )
     try:
-        audio, epubs = pair_files(folder, audio_pattern, epub_pattern)
+        found = pair_folder(folder, audio_pattern, epub_pattern)
     except re.error as e:
         raise typer.BadParameter(f"invalid pattern: {e}") from e
-    for n in sorted(audio.keys() - epubs.keys()):
-        logger.warning(f"SKIP: {audio[n].name} has no matching epub")
-    for n in sorted(epubs.keys() - audio.keys()):
-        logger.info(f"note: {epubs[n].name} has no matching audio")
-    jobs = [(f"Book {n}", audio[n], epubs[n]) for n in sorted(audio.keys() & epubs.keys())]
-    paired = {a for _, a, _ in jobs}, {e for _, _, e in jobs}
-    jobs += [(stem, a, e) for stem, a, e in pair_by_name(folder, *paired)]
+    for path in found.unmatched_audio.values():
+        logger.warning(f"SKIP: {path.name} has no matching epub")
+    for path in found.unmatched_epubs.values():
+        logger.info(f"note: {path.name} has no matching audio")
+    jobs = found.jobs
     if not jobs:
         logger.error(f"no convertible pairs found in {folder}")
         raise typer.Exit(1)
@@ -349,6 +367,54 @@ def stalign(
         logger.error(str(e))
         raise typer.Exit(1) from e
     logger.success(f"DONE: {final} ({final.stat().st_size / 1e6:.0f} MB)")
+
+
+@app.command()
+def status(
+    target: Annotated[
+        Path | None,
+        typer.Argument(
+            help="A book's audio file, EPUB or work folder. Default: every book in the work folder."
+        ),
+    ] = None,
+    work_dir: WorkDir = DEFAULT_WORK,
+    watch: Annotated[
+        bool, typer.Option("--watch", "-w", help="Keep refreshing until nothing is running.")
+    ] = False,
+    interval: Annotated[
+        float, typer.Option(min=0.5, help="Seconds between refreshes with --watch.")
+    ] = 2.0,
+) -> None:
+    """Show how far a conversion has got, even one running in another terminal.
+
+    Reads the progress each run records in its work folder: the stage
+    checklist, chapters placed, speed and time left, and whether the process is
+    still alive. With --watch the report refreshes until nothing is running.
+    """
+    setup_logging()
+
+    def load() -> list[BookStatus]:
+        if target is None:
+            return read_all_status(work_dir)
+        folder = target if (target / "state.json").is_file() else work_dir / work_name(target.stem)
+        one = read_status(folder)
+        if one is None:
+            logger.error(f"no conversion found for {target} (looked in {folder})")
+            raise typer.Exit(1)
+        return [one]
+
+    view, active = build_view(load())
+    if not watch or not active:
+        console.print(view)
+        return
+    try:
+        with Live(view, console=console, refresh_per_second=4) as live:
+            while active:
+                time.sleep(interval)
+                view, active = build_view(load())
+                live.update(view)
+    except KeyboardInterrupt:
+        pass
 
 
 def main() -> None:

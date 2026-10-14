@@ -18,12 +18,20 @@ Why this approach (learned the hard way on a real 24-hour audiobook):
     minutes over a long book) and don't anchor purely on EPUB word counts
     either (local narration pace varies enough -- dialogue-heavy vs
     descriptive passages -- to be off by several minutes in places).
-- Every chapter transition in a professionally narrated audiobook has a
-    real, clean ~3.5s+ silence. It is reliably followed 3-9s later by a
-    second, shorter ~1.5-3s "companion" gap (some kind of
-    announcement/sting before the actual chapter content starts) that is
-    NOT the real boundary -- picking the wrong one of that pair is what
-    causes chapters to start mid-sentence.
+- Many professionally narrated audiobooks mark a chapter transition with a
+    clean ~3.5s+ silence, usually followed 3-9s later by a second, shorter
+    ~1.5-3s "companion" gap (some kind of announcement/sting before the actual
+    chapter content starts) that is NOT the real boundary -- picking the wrong
+    one of that pair is what causes chapters to start mid-sentence.
+- Some recordings have no usable silence at all: chapters joined by music, a
+    spoken "Part 2 of 3", or nothing (a 20-hour recording of 40 chapters had
+    only 59 pauses, most nowhere near a chapter start). For those,
+    ``align_by="transcribe"`` transcribes a window around where each chapter
+    should start (estimated from word counts since the last confirmed
+    boundary) and finds the chapter's opening words in it. An epigraph file
+    before the numbered chapter counts as part of the chapter, because the
+    narrator reads it first. ``"auto"`` tries silence and switches to the
+    transcript when silence fails or looks unreliable.
 - The robust way to find real boundaries: chain forward from the
     previous chapter's *actual detected* boundary, not from any computed
     estimate. Take the first qualifying gap after it. This can't silently
@@ -64,6 +72,7 @@ from mp3_epub_m4b.chapters import (
     build_ffmetadata,
     build_segments,
     deviating_segments,
+    silence_doubts,
 )
 from mp3_epub_m4b.epub_extract import EpubResult, extract_epub
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError, ffprobe_duration, scan_silences
@@ -72,12 +81,28 @@ from mp3_epub_m4b.state import (
     AlignProgress,
     PipelineState,
     Segment,
+    StateMismatchError,
     check_fingerprint,
     read_state,
     write_state,
 )
+from mp3_epub_m4b.status import PROGRESS_FILE, ProgressWriter, StatusFn
+from mp3_epub_m4b.transcribe import (
+    CONFIDENT_SCORE,
+    WIDEN_STEPS,
+    WhisperError,
+    boundary_in_gap,
+    estimate_rate,
+    expected_start,
+    find_opening,
+    find_whisper,
+    search_window,
+    transcribe_window,
+)
 
 SCAN_NOISE_DB = -30.0  # silence threshold used for the whole-file scan
+CHAPTER_ONE_WINDOW = 300.0  # how far into the file (s) to look for chapter 1's opening words
+ALIGN_BY_CHOICES = ("silence", "transcribe", "auto")
 AUDIO_CHANNELS = 1  # output is mono ...
 AUDIO_SAMPLE_RATE = 32000  # ... at 32 kHz, which is plenty for narrated speech
 
@@ -173,6 +198,8 @@ class Pipeline:
         outro_max_tail: Longest accepted outro tail, in seconds.
         overwrite: Replace an existing output file instead of raising.
         readaloud: Alignment settings; when set, a ``readaloud`` stage runs after delivery.
+        align_by: How chapters are placed: ``"silence"`` or ``"transcribe"``.
+        whisper_model: GGML model used by ``align_by="transcribe"``.
         on_progress: Called as ``(done, total)`` during long single-step work
             (the scan and assemble stages).
         state_path: Location of the JSON checkpoint.
@@ -198,6 +225,8 @@ class Pipeline:
         *,
         overwrite: bool = False,
         readaloud: AlignOptions | None = None,
+        align_by: str = "silence",
+        whisper_model: Path | None = None,
         on_progress: ProgressFn | None = None,
     ) -> None:
         """Create a pipeline and load (or validate) any existing checkpoint.
@@ -218,9 +247,13 @@ class Pipeline:
             outro_max_tail: Longest accepted outro tail (s).
             overwrite: Replace an existing output file instead of raising.
             readaloud: Alignment settings; ``None`` skips the readaloud stage.
+            align_by: ``"silence"`` places chapters at detected silences;
+                ``"transcribe"`` finds each chapter's opening words in a transcript.
+            whisper_model: GGML model for ``align_by="transcribe"`` (default: found automatically).
             on_progress: Progress sink for the scan and assemble stages.
 
         Raises:
+            ValueError: If ``align_by`` is not a known mode.
             StateMismatchError: If ``work_dir`` holds a checkpoint made for
                 different files or options.
         """
@@ -246,9 +279,15 @@ class Pipeline:
         self.outro_max_tail = outro_max_tail
         self.overwrite = overwrite
         self.readaloud = readaloud
+        if align_by not in ALIGN_BY_CHOICES:
+            raise ValueError(f"align_by must be one of {ALIGN_BY_CHOICES}, not {align_by!r}")
+        self.align_by = align_by
+        self.whisper_model = whisper_model
         self.on_progress = on_progress
+        self.on_status: StatusFn | None = None
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.progress = ProgressWriter(self.work_dir / PROGRESS_FILE)
         self.state_path = self.work_dir / "state.json"
         self.silences_path = self.work_dir / "silences.json"
         self._silences: SilenceIndex | None = None
@@ -257,7 +296,7 @@ class Pipeline:
     # ------------------------------------------------------------------ state
     def _fingerprint(self) -> dict[str, Any]:
         """Identify the inputs and options a checkpoint belongs to."""
-        return {
+        fingerprint: dict[str, Any] = {
             "mp3": self.mp3.name,
             "mp3_size": self.mp3.stat().st_size,
             "epub": self.epub.name,
@@ -272,6 +311,13 @@ class Pipeline:
             "detect_outro": self.detect_outro,
             "outro_max_tail": self.outro_max_tail,
         }
+        # added only when non-default, so checkpoints from before this option still resume
+        # (auto starts as silence, so it fingerprints like silence)
+        if self.align_by == "transcribe":
+            fingerprint["align_by"] = self.align_by
+            if self.whisper_model is not None:
+                fingerprint["whisper_model"] = self.whisper_model.name
+        return fingerprint
 
     def _load_state(self) -> PipelineState:
         """Load the checkpoint (migrating older ones), or start at the ``extract`` stage.
@@ -314,6 +360,28 @@ class Pipeline:
     def stages(self) -> tuple[str, ...]:
         """The stages this pipeline will run (``readaloud`` only when enabled)."""
         return STAGES if self.readaloud is not None else STAGES[:-1]
+
+    def _report(self, done: float, total: float) -> None:
+        """Forward timed-stage progress (seconds of audio) to the caller and ``progress.json``."""
+        if self.on_progress is not None:
+            self.on_progress(done, total)
+        self.progress.update(self.state["stage"], done=done, total=total, unit="audio")
+
+    def _status(
+        self,
+        detail: str,
+        done: float | None = None,
+        total: float | None = None,
+        *,
+        unit: str | None = None,
+        force: bool = False,
+    ) -> None:
+        """Say what the pipeline is doing now: to the caller's ``on_status`` and ``progress.json``."""
+        if self.on_status is not None:
+            self.on_status(detail, done, total)
+        self.progress.update(
+            self.state["stage"], detail=detail, done=done, total=total, unit=unit, force=force
+        )
 
     def _save(self) -> None:
         """Atomically write the in-memory state to ``state_path``."""
@@ -361,6 +429,7 @@ class Pipeline:
         Raises:
             ValueError: If no chapters could be found in the EPUB.
         """
+        self._status("reading the EPUB and probing the audio", force=True)
         result = extract_epub(self.epub, self.work_dir / "epub")
         if not result["chapters"]:
             raise ValueError(
@@ -405,9 +474,13 @@ class Pipeline:
         min_silence = min(self.min_gap, COMPANION_MIN_SILENCE)
         total = self._duration()
         cached = self._read_silences_file()
-        if cached is None or cached["min_silence"] != min_silence:
+        if (
+            cached is None
+            or cached["min_silence"] != min_silence
+            or cached.get("noise_db") != SCAN_NOISE_DB
+        ):
             silences = scan_silences(
-                self.mp3, total, SCAN_NOISE_DB, min_silence, on_progress=self.on_progress
+                self.mp3, total, SCAN_NOISE_DB, min_silence, on_progress=self._report
             )
             tmp = self.silences_path.with_suffix(".json.tmp")
             tmp.write_text(
@@ -443,7 +516,13 @@ class Pipeline:
 
     # ------------------------------------------------------------------ align
     def stage_align(self, budget: float) -> bool:
-        """Locate chapter boundaries by chaining silence lookups forward.
+        """Locate chapter boundaries: by silence, by transcript, or silence first then transcript.
+
+        ``align_by="silence"`` chains silence lookups forward;
+        ``"transcribe"`` finds each chapter's opening words in a transcript;
+        ``"auto"`` starts with silence and switches to the transcript when
+        silence fails or looks unreliable (see :func:`silence_doubts`). The
+        method in use is kept in the checkpoint, so a resumed run continues it.
 
         Args:
             budget: Wall-clock seconds to spend before checkpointing and returning.
@@ -454,7 +533,104 @@ class Pipeline:
 
         Raises:
             RuntimeError: If the audio runs out before every chapter has a start
-                (the EPUB probably has more chapters than the audiobook).
+                (the EPUB probably has more chapters than the audiobook), and
+                transcript alignment is not an option.
+            StateMismatchError: If ``align_by="silence"`` meets a checkpoint
+                already aligned by transcript.
+        """
+        align = self._align()
+        method = align.get("method")
+        if self.align_by == "silence" and method == "transcribe":
+            raise StateMismatchError(
+                f"{self.state_path} was aligned by transcript; use --fresh to align by silence"
+            )
+        if self.align_by == "transcribe" or method == "transcribe":
+            return self._align_by_transcript(budget)
+        n_chapters = len(self._epub()["chapters"])
+        try:
+            finished = self._align_by_silence(budget)
+        except RuntimeError as e:
+            if self.align_by == "auto":
+                return self._switch_to_transcript(str(e), cause=e)
+            raise RuntimeError(
+                f"{e}; if the recording has no pause between chapters, try --align-by transcribe"
+            ) from e
+        if not finished:
+            return False
+        if self.align_by == "auto":
+            reason = self._silence_doubts(align)
+            if reason:
+                return self._switch_to_transcript(reason)
+        return self._finish_align(align, n_chapters, self._duration())
+
+    def _silence_doubts(self, align: AlignProgress) -> str | None:
+        """Why the finished silence placement looks unreliable, or ``None`` (see :func:`silence_doubts`)."""
+        chapters = self._epub()["chapters"]
+        segments = build_segments(
+            chapters,
+            align["boundaries"],
+            total_dur=self._duration(),
+            outro_start=None,
+            intro_title=self.intro_title,
+            outro_title=self.outro_title,
+        )
+        return silence_doubts(len(chapters), align["fallback"], len(deviating_segments(segments)))
+
+    def _switch_to_transcript(self, reason: str, cause: RuntimeError | None = None) -> bool:
+        """Discard the silence placement and start over by transcript (``align_by="auto"``).
+
+        Without whisper.cpp there is nothing to switch to: a silence failure is
+        re-raised with a hint, and a finished-but-doubtful silence placement is
+        kept with a warning, so such users see what they always saw.
+
+        Args:
+            reason: Why silence is not trusted, for the log.
+            cause: The silence error being handled, if it failed outright.
+
+        Returns:
+            ``False`` (the transcript pass runs on the next call) or, when whisper
+            is missing and silence had finished, the result of finishing it.
+
+        Raises:
+            RuntimeError: Re-raising ``cause`` with a hint, when whisper is missing.
+        """
+        align = self._align()
+        try:
+            find_whisper(self.whisper_model)
+        except WhisperError as missing:
+            if cause is not None:
+                raise RuntimeError(
+                    f"{cause}; transcript alignment could not be tried ({missing})"
+                ) from cause
+            logger.warning(
+                f"{reason}; transcript alignment is not available ({missing}), "
+                "so the silence placement is kept"
+            )
+            return self._finish_align(align, len(self._epub()["chapters"]), self._duration())
+        logger.warning(f"{reason}; switching to transcript alignment")
+        align["boundaries"] = {}
+        align["next"] = 1
+        align["low_confidence"] = []
+        align["fallback"] = []
+        align["unmatched"] = []
+        align["method"] = "transcribe"
+        align.pop("outro_start", None)
+        self.state.pop("segments", None)
+        self._save()
+        self._status(f"switching to transcript alignment: {reason}", 0, None, force=True)
+        return False
+
+    def _align_by_silence(self, budget: float) -> bool:
+        """Chain silence lookups forward from each chapter's detected start.
+
+        Args:
+            budget: Wall-clock seconds to spend before checkpointing and returning.
+
+        Returns:
+            Whether every chapter now has a start.
+
+        Raises:
+            RuntimeError: If the audio runs out before every chapter has a start.
         """
         chapters = self._epub()["chapters"]
         n_chapters = len(chapters)
@@ -464,6 +640,7 @@ class Pipeline:
         total_words = sum(c["word_count"] for c in chapters)
         secs_per_word = total_dur / total_words if total_words else 0.0
 
+        align["method"] = "silence"
         if "1" not in align["boundaries"]:
             actual = 0.0
             if self.detect_intro:
@@ -519,7 +696,22 @@ class Pipeline:
             align["boundaries"][str(i)] = actual
             align["next"] = i + 1
             self._save()
+            self._status(
+                f"chapter {i}/{n_chapters} placed at {actual:.0f}s ({chapters[i - 1]['title']})",
+                i,
+                n_chapters,
+                unit="chapters",
+            )
 
+        return align["next"] > n_chapters
+
+    def _finish_align(self, align: AlignProgress, n_chapters: int, total_dur: float) -> bool:
+        """Decide the outro and, once every chapter is placed, build the segments.
+
+        Returns:
+            ``True`` once the stage has advanced to ``assemble``; ``False`` if
+            chapters remain to be located.
+        """
         done = align["next"] > n_chapters
         if done and "outro_start" not in align:
             outro_start = None
@@ -549,6 +741,132 @@ class Pipeline:
             return True
         return False
 
+    def _align_by_transcript(self, budget: float) -> bool:
+        """Locate chapters by finding their opening words in a transcript.
+
+        For each chapter, estimates its start from the last confirmed boundary
+        and the word counts since, transcribes a window around that estimate
+        and matches the EPUB's opening words against it. A chapter that cannot
+        be matched is recorded in ``unmatched`` and placed by interpolation
+        once its neighbours are known.
+
+        Args:
+            budget: Wall-clock seconds to spend before checkpointing and returning.
+
+        Returns:
+            ``True`` once every chapter is placed and the stage has advanced to
+            ``assemble``; ``False`` if more calls are needed.
+
+        Raises:
+            WhisperError: If whisper.cpp or its model is missing or fails.
+        """
+        chapters = self._epub()["chapters"]
+        n_chapters = len(chapters)
+        total_dur = self._duration()
+        align = self._align()
+        words = [c["word_count"] for c in chapters]
+        default_rate = total_dur / sum(words) if sum(words) else 0.0
+        unmatched = align.setdefault("unmatched", [])
+        align["method"] = "transcribe"
+        binary, model = find_whisper(self.whisper_model)
+        scratch = self.work_dir / "whisper"
+
+        t0 = time.monotonic()
+        while align["next"] <= n_chapters and (time.monotonic() - t0) < budget:
+            i = align["next"]
+            confirmed = {
+                int(k): v for k, v in align["boundaries"].items() if int(k) not in unmatched
+            }
+            anchor = max(confirmed, default=1)
+            anchor_start = confirmed.get(anchor, 0.0)
+            rate = estimate_rate(confirmed, words, default_rate)
+            expected = expected_start(anchor, anchor_start, i, words, rate)
+
+            hit, used = None, ""
+            for widen in WIDEN_STEPS:
+                if i == 1:
+                    lo, hi = 0.0, min(total_dur, CHAPTER_ONE_WINDOW * widen)
+                else:
+                    lo, hi = search_window(expected, anchor_start, total_dur, widen)
+                self._status(
+                    f"chapter {i}/{n_chapters} ({chapters[i - 1]['title']}): listening "
+                    f"{lo:.0f}-{hi:.0f}s, attempt {WIDEN_STEPS.index(widen) + 1}/{len(WIDEN_STEPS)}",
+                    i - 1,
+                    n_chapters,
+                    unit="chapters",
+                    force=True,
+                )
+                heard = transcribe_window(
+                    self.mp3, lo, hi - lo, binary=binary, model=model, scratch=scratch
+                )
+                chapter = chapters[i - 1]
+                candidates = (
+                    ("opening", chapter.get("opening", "")),
+                    ("body_opening", chapter.get("body_opening", "")),
+                )
+                for key, text in candidates:
+                    if text and (hit := find_opening(heard, text)):
+                        used = key
+                        break
+                if hit:
+                    break
+
+            if hit is None:
+                unmatched.append(i)
+                logger.warning(
+                    f"chapter {i} ({chapters[i - 1]['title']!r}): opening words not heard "
+                    f"near {expected:.0f}s; placing it by interpolation"
+                )
+            else:
+                boundary = round(boundary_in_gap(hit.prev_end, hit.start), 3)
+                align["boundaries"][str(i)] = boundary
+                if hit.score < CONFIDENT_SCORE or used == "body_opening":
+                    align["low_confidence"].append(i)
+                logger.info(
+                    f"chapter {i}: heard at {boundary:.0f}s "
+                    f"(expected {expected:.0f}s, score {hit.score:.2f}, {used})"
+                )
+            align["next"] = i + 1
+            self._save()
+            self._status(
+                f"chapter {i}/{n_chapters} "
+                + (
+                    "not heard; will be interpolated"
+                    if hit is None
+                    else f"heard at {boundary:.0f}s"
+                ),
+                i,
+                n_chapters,
+                unit="chapters",
+                force=True,
+            )
+
+        if align["next"] > n_chapters and unmatched:
+            self._interpolate_unmatched(align, words, total_dur)
+        return self._finish_align(align, n_chapters, total_dur)
+
+    @staticmethod
+    def _interpolate_unmatched(align: AlignProgress, words: list[int], total_dur: float) -> None:
+        """Place unmatched chapters between their matched neighbours, by word count."""
+        unmatched = set(align.get("unmatched", []))
+        done = {int(k) for k in align["boundaries"]}
+        if unmatched <= done:  # already interpolated on an earlier call
+            return
+        known: dict[int, float] = {int(k): v for k, v in align["boundaries"].items()}
+        known = {k: v for k, v in known.items() if k not in unmatched}
+        known.setdefault(1, 0.0)  # chapter 1 unmatched: assume the audio starts with it
+        known[len(words) + 1] = total_dur  # virtual end, bounds trailing unmatched chapters
+        order = sorted(known)
+        for i in sorted(unmatched):
+            if i == 1:
+                align["boundaries"]["1"] = 0.0
+                continue
+            lo = max(k for k in order if k < i)
+            hi = min(k for k in order if k > i)
+            span = sum(words[lo - 1 : hi - 1]) or 1
+            frac = sum(words[lo - 1 : i - 1]) / span
+            align["boundaries"][str(i)] = round(known[lo] + frac * (known[hi] - known[lo]), 3)
+
     def _build_segments(self) -> None:
         """Turn the detected boundaries into ``state["segments"]``.
 
@@ -566,6 +884,7 @@ class Pipeline:
             outro_title=self.outro_title,
             low_confidence=align["low_confidence"],
             fallback=align["fallback"],
+            unmatched=align.get("unmatched", ()),
         )
         self.state["segments"] = segments
         self._save()
@@ -646,7 +965,7 @@ class Pipeline:
             str(tmp_path),
         ]
         logger.info("encoding the m4b (single pass)...")
-        _run_with_progress(cmd, total, self.on_progress)
+        _run_with_progress(cmd, total, self._report)
         tmp_path.replace(final_path)
 
         out_dur = ffprobe_duration(final_path)
@@ -798,6 +1117,7 @@ class Pipeline:
         stage = self.state["stage"]
         if stage == "done":
             return True
+        self.progress.update(stage, force=True)
         methods: dict[str, Callable[[float], bool]] = {
             "extract": self.stage_extract,
             "scan": self.stage_scan,

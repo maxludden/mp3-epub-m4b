@@ -42,6 +42,8 @@ class AlignProgress(TypedDict):
     low_confidence: list[int]  # chapters whose boundary lacked a companion gap
     fallback: list[int]  # chapters placed by a fixed offset (no gap found)
     outro_start: NotRequired[float | None]  # set once the outro search has run
+    unmatched: NotRequired[list[int]]  # transcribe mode: chapters whose opening was never heard
+    method: NotRequired[str]  # how chapters are being placed: "silence" or "transcribe"
 
 
 class PipelineState(TypedDict):

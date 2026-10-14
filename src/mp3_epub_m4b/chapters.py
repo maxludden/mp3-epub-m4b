@@ -20,6 +20,11 @@ COMPANION_WINDOW = 10.0  # how soon (s) after a chapter gap the companion appear
 MIN_EARLY_FRACTION = 0.4  # a gap earlier than this share of the word-count estimate is rejected
 FALLBACK_SPAN = 900.0  # where (s after the previous chapter) to place a chapter with no gap found
 MAX_DEVIATION = 0.30  # relative duration deviation from the word-count estimate that is flagged
+MAX_FALLBACKS = (
+    1  # a fallback is a fixed guess; more than this means silence isn't marking chapters
+)
+MAX_DEVIANT_SHARE = 0.25  # share of chapters allowed to stray from their word-count length
+MIN_CHAPTERS_FOR_SHARE = 4  # too few chapters make the share meaningless
 
 
 class SilenceIndex:
@@ -131,6 +136,7 @@ def build_segments(
     outro_title: str,
     low_confidence: Sequence[int] = (),
     fallback: Sequence[int] = (),
+    unmatched: Sequence[int] = (),
 ) -> list[Segment]:
     """Turn detected chapter starts into contiguous output segments.
 
@@ -146,6 +152,7 @@ def build_segments(
         outro_title: Title for the outro segment.
         low_confidence: Chapters whose boundary lacked a companion gap.
         fallback: Chapters placed by a fixed offset because no gap was found.
+        unmatched: Chapters whose opening words were never heard (placed by interpolation).
 
     Returns:
         The segments, numbered from 0, with word counts and boundary notes
@@ -156,7 +163,15 @@ def build_segments(
         segments.append(make_segment(0, intro_title, 0.0, boundaries["1"]))
     for i, c in enumerate(chapters, start=1):
         end = boundaries[str(i + 1)] if i < len(chapters) else (outro_start or total_dur)
-        note = "fallback" if i in fallback else "low-confidence" if i in low_confidence else ""
+        note = (
+            "unmatched"
+            if i in unmatched
+            else "fallback"
+            if i in fallback
+            else "low-confidence"
+            if i in low_confidence
+            else ""
+        )
         segments.append(
             make_segment(
                 len(segments), c["title"], boundaries[str(i)], end, words=c["word_count"], note=note
@@ -190,6 +205,35 @@ def deviating_segments(segments: Sequence[Segment]) -> list[tuple[int, str, floa
         if exp > 0 and abs(s["duration"] - exp) / exp > MAX_DEVIATION:
             flagged.append((s["n"], s["title"], round(s["duration"], 1), round(exp, 1)))
     return flagged
+
+
+def silence_doubts(n_chapters: int, fallback: Sequence[int], deviating: int) -> str | None:
+    """Why a silence-based placement should not be trusted, or ``None`` if it looks sound.
+
+    Silence only works when the recording marks chapters with a pause. Two
+    symptoms show it did not: chapters placed by a fixed guess because no gap
+    was found, and many chapters whose length is far from what their word count
+    predicts (a missed boundary merges two chapters and shifts every later one).
+
+    Args:
+        n_chapters: Chapters in the EPUB.
+        fallback: Chapters placed by the fixed-offset guess.
+        deviating: How many chapters stray from their word-count length.
+
+    Returns:
+        A one-line reason, or ``None``.
+    """
+    # TODO(human): tune how readily auto mode abandons silence for the (slow) transcript.
+    # MAX_FALLBACKS and MAX_DEVIANT_SHARE above are working defaults from one real book
+    # (9 guessed + 26 of 40 off-length by silence; 0 guessed + 2 of 40 by transcript).
+    if len(fallback) > MAX_FALLBACKS:
+        return f"{len(fallback)} of {n_chapters} chapters had no clear silence and were placed by guess"
+    if n_chapters >= MIN_CHAPTERS_FOR_SHARE and deviating / n_chapters > MAX_DEVIANT_SHARE:
+        return (
+            f"{deviating} of {n_chapters} chapters are far from the length their "
+            "word counts predict"
+        )
+    return None
 
 
 def ffmeta_escape(s: str) -> str:

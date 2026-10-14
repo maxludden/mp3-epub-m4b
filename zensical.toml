@@ -2,10 +2,8 @@
 site_url = "https://maxludden.github.io/mp3-epub-m4b/"
 site_name = "mp3+epub=m4b"
 site_description = "Convert single-file audiobooks plus EPUBs into chaptered M4B files"
-# site_author = "Your name"
-
-# copyright = "Copyright &copy; 2026 Your name"
-
+site_author = "Max Ludden"
+copyright = "Copyright &copy; 2026 Max Ludden"
 repo_url = "https://github.com/maxludden/mp3-epub-m4b"
 # repo_name = "user/repo"
 # edit_uri = "edit/main/docs/"
@@ -28,7 +26,7 @@ nav = [
 [project.theme]
 # variant = "classic"
 # custom_dir = "overrides"
-# favicon = "images/favicon.png"
+favicon = "/docs/img/icon.svg"
 language = "en"
 features = [
   "announce.dismiss",
