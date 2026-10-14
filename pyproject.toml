@@ -24,6 +24,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "loguru>=0.7",
     "lxml>=5",
+    "mcp>=2.3.0",
     "python-dotenv>=1.0",
     "rich>=13",
     "typer>=0.12",
@@ -36,6 +37,7 @@ Issues = "https://github.com/maxludden/mp3-epub-m4b/issues"
 
 [project.scripts]
 mp3-epub-m4b = "mp3_epub_m4b.cli:main"
+mp3-epub-m4b-mcp = "mp3_epub_m4b.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

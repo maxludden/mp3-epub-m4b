@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Container
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -98,3 +99,41 @@ def pair_by_name(
     pairs = [(audio[k].stem, audio[k], epubs[k]) for k in sorted(audio.keys() & epubs.keys())]
     logger.debug(f"matched {len(pairs)} identically named pair(s) in {folder}")
     return pairs
+
+
+@dataclass
+class FolderPairs:
+    """Everything :func:`pair_folder` found in a folder.
+
+    Attributes:
+        jobs: ``(label, audio, epub)`` for every convertible pair, numbered pairs first.
+        unmatched_audio: Numbered audio files with no EPUB of the same number, by number.
+        unmatched_epubs: Numbered EPUBs with no audio file of the same number, by number.
+    """
+
+    jobs: list[tuple[str, Path, Path]] = field(default_factory=list)
+    unmatched_audio: dict[int, Path] = field(default_factory=dict)
+    unmatched_epubs: dict[int, Path] = field(default_factory=dict)
+
+
+def pair_folder(
+    folder: Path,
+    audio_pattern: str = DEFAULT_AUDIO_PATTERN,
+    epub_pattern: str = DEFAULT_EPUB_PATTERN,
+) -> FolderPairs:
+    """Pair a folder's audio with its EPUBs: by number first, then by identical name.
+
+    Shared by the ``batch`` command and the MCP server.
+
+    Raises:
+        re.error: If either pattern is not a valid regex.
+    """
+    audio, epubs = pair_files(folder, audio_pattern, epub_pattern)
+    result = FolderPairs(
+        unmatched_audio={n: audio[n] for n in sorted(audio.keys() - epubs.keys())},
+        unmatched_epubs={n: epubs[n] for n in sorted(epubs.keys() - audio.keys())},
+    )
+    result.jobs = [(f"Book {n}", audio[n], epubs[n]) for n in sorted(audio.keys() & epubs.keys())]
+    paired = {a for _, a, _ in result.jobs}, {e for _, _, e in result.jobs}
+    result.jobs += [(stem, a, e) for stem, a, e in pair_by_name(folder, *paired)]
+    return result

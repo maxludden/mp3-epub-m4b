@@ -59,7 +59,7 @@ from mp3_epub_m4b.options import (
     WorkDir,
     Yes,
 )
-from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
+from mp3_epub_m4b.pairing import find_epub, pair_folder
 from mp3_epub_m4b.report import chapter_table, pairs_table
 from mp3_epub_m4b.run import work_name
 from mp3_epub_m4b.status import BookStatus, build_view, read_all_status, read_status
@@ -268,16 +268,14 @@ def batch(
         whisper_model=whisper_model,
     )
     try:
-        audio, epubs = pair_files(folder, audio_pattern, epub_pattern)
+        found = pair_folder(folder, audio_pattern, epub_pattern)
     except re.error as e:
         raise typer.BadParameter(f"invalid pattern: {e}") from e
-    for n in sorted(audio.keys() - epubs.keys()):
-        logger.warning(f"SKIP: {audio[n].name} has no matching epub")
-    for n in sorted(epubs.keys() - audio.keys()):
-        logger.info(f"note: {epubs[n].name} has no matching audio")
-    jobs = [(f"Book {n}", audio[n], epubs[n]) for n in sorted(audio.keys() & epubs.keys())]
-    paired = {a for _, a, _ in jobs}, {e for _, _, e in jobs}
-    jobs += [(stem, a, e) for stem, a, e in pair_by_name(folder, *paired)]
+    for path in found.unmatched_audio.values():
+        logger.warning(f"SKIP: {path.name} has no matching epub")
+    for path in found.unmatched_epubs.values():
+        logger.info(f"note: {path.name} has no matching audio")
+    jobs = found.jobs
     if not jobs:
         logger.error(f"no convertible pairs found in {folder}")
         raise typer.Exit(1)
@@ -369,6 +367,8 @@ def stalign(
         logger.error(str(e))
         raise typer.Exit(1) from e
     logger.success(f"DONE: {final} ({final.stat().st_size / 1e6:.0f} MB)")
+
+
 @app.command()
 def status(
     target: Annotated[
@@ -415,8 +415,6 @@ def status(
                 live.update(view)
     except KeyboardInterrupt:
         pass
-
-
 
 
 def main() -> None:
