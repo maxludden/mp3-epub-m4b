@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -331,7 +332,8 @@ def test_cli_defaults_and_slice_validation() -> None:
     from mp3_epub_m4b.cli import app
 
     result = CliRunner().invoke(app, ["convert", __file__, __file__, "--slice-seconds", "0"])
-    assert result.exit_code != 0 and "slice-seconds" in result.output.lower().replace("_", "-")
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)  # CI forces colour, splitting option names
+    assert result.exit_code != 0 and "slice-seconds" in plain.lower().replace("_", "-")
     import typer.main
 
     for name in ("convert", "batch"):
