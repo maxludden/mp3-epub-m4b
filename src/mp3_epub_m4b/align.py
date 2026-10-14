@@ -26,10 +26,12 @@ from pathlib import Path
 
 from loguru import logger
 
-from audiobook_kit.log import console
+from mp3_epub_m4b.log import console
 
-TOOL_DIR = Path.home() / ".audiobook-kit-align"
-LOG_DIR = Path.home() / ".audiobook-kit-work" / "align-logs"
+TOOL_DIR = Path.home() / ".mp3-epub-m4b-align"
+LOG_DIR = (
+    Path(os.environ.get("MP3_EPUB_M4B_WORK") or Path.home() / ".mp3-epub-m4b-work") / "align-logs"
+)
 MIN_NODE_MAJOR = 24
 NODE_CANDIDATES = (Path("/opt/homebrew/bin/node"), Path("/usr/local/bin/node"))
 PACKAGES = ("@storyteller-platform/align",)
@@ -121,8 +123,8 @@ def ensure_installed(node: Path, tool_dir: Path = TOOL_DIR) -> Path:
         package_json = tool_dir / "package.json"
         if not package_json.exists():
             # Not `npm init -y`: it derives the name from the directory, and npm
-            # rejects the leading dot in ".audiobook-kit-align".
-            package_json.write_text(json.dumps({"name": "audiobook-kit-align", "private": True}))
+            # rejects the leading dot in ".mp3-epub-m4b-align".
+            package_json.write_text(json.dumps({"name": "mp3-epub-m4b-align", "private": True}))
         subprocess.run([npm, "install", *packages], cwd=tool_dir, check=True)
     except (OSError, subprocess.CalledProcessError) as e:
         raise AlignError(f"install failed: {e}") from e
@@ -180,7 +182,7 @@ def _stream(cmd: Sequence[str], log_path: Path, env: dict[str, str]) -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env=env
+            env=env,
         ) as proc,
     ):
         assert proc.stdout is not None
@@ -191,10 +193,7 @@ def _stream(cmd: Sequence[str], log_path: Path, env: dict[str, str]) -> int:
 
 
 def align_book(
-    audio: Path,
-    epub: Path,
-    out: Path | None = None,
-    opts: AlignOptions | None = None
+    audio: Path, epub: Path, out: Path | None = None, opts: AlignOptions | None = None
 ) -> Path:
     """Align ``audio`` (a file or a directory of audio files) with ``epub``.
 

@@ -5,19 +5,25 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from audiobook_kit.epub_extract import extract_epub
+import pytest
 
-from .conftest import CHAPTERS, WORDS_PER_SECOND, make_epub, needs_ffmpeg
+from mp3_epub_m4b.epub_extract import extract_epub
+
+from .conftest import CHAPTERS, WORDS_PER_SECOND, make_epub
 
 
-@needs_ffmpeg
+@pytest.mark.ffmpeg
 def test_extract_epub3(tmp_path: Path) -> None:
     epub = tmp_path / "b.epub"
     make_epub(epub)
     r = extract_epub(epub, tmp_path / "x")
     assert r["meta"] == {
-        "title": "Fish & Chips: A Test", "author": "Ann Author", "publisher": "Pub",
-        "year": "2021", "series": "The Series", "series_index": "2",
+        "title": "Fish & Chips: A Test",
+        "author": "Ann Author",
+        "publisher": "Pub",
+        "year": "2021",
+        "series": "The Series",
+        "series_index": "2",
     }
     assert r["cover"] is not None and Path(r["cover"]).exists()
     assert [(c["n"], c["title"]) for c in r["chapters"]] == [

@@ -1,7 +1,7 @@
 """
 Resumable MP3/M4A (+ EPUB) -> chaptered M4B pipeline.
 
-Drive it through the ``audiobook-kit`` CLI (:mod:`audiobook_kit.cli`), or
+Drive it through the ``mp3-epub-m4b`` CLI (:mod:`mp3_epub_m4b.cli`), or
 call :meth:`Pipeline.run` repeatedly until ``state["stage"] == "done"``. Each
 call does a bounded slice of work and checkpoints to
 ``<work_dir>/state.json``, so an interrupted run resumes where it left off.
@@ -10,9 +10,9 @@ Stages: extract -> scan -> align -> assemble -> deliver [-> readaloud]
 
 The optional ``readaloud`` stage (enabled by passing :class:`AlignOptions`) aligns the
 delivered M4B with the EPUB into an EPUB 3 with Media Overlays via
-:mod:`audiobook_kit.stalign`.
+:mod:`mp3_epub_m4b.stalign`.
 
-Why this approach (learned the hard way on "Mark of the Fool 10"):
+Why this approach (learned the hard way on a real 24-hour audiobook):
 - Don't derive chapter boundaries from a book-seller's displayed
     chapter durations (they're rounded to the second and drift by 1-2
     minutes over a long book) and don't anchor purely on EPUB word counts
@@ -42,7 +42,7 @@ Why this approach (learned the hard way on "Mark of the Fool 10"):
 
 from __future__ import annotations
 
-import bisect
+import hashlib
 import json
 import os
 import re
@@ -51,69 +51,37 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any
 
 from loguru import logger
 
-from audiobook_kit.align_chapters import FFmpegError, ffprobe_duration, scan_silences
-from audiobook_kit.epub_extract import EpubMeta, EpubResult, extract_epub
-from audiobook_kit.stalign import AlignOptions, align_book
-
-STAGES = ("extract", "scan", "align", "assemble", "deliver", "readaloud")
+from mp3_epub_m4b.align import AlignOptions, align_book
+from mp3_epub_m4b.chapters import (
+    COMPANION_MIN_SILENCE,
+    FALLBACK_SPAN,
+    MIN_EARLY_FRACTION,
+    SilenceIndex,
+    build_ffmetadata,
+    build_segments,
+    deviating_segments,
+)
+from mp3_epub_m4b.epub_extract import EpubResult, extract_epub
+from mp3_epub_m4b.ffmpeg_tools import FFmpegError, ffprobe_duration, scan_silences
+from mp3_epub_m4b.state import (
+    STAGES,
+    AlignProgress,
+    PipelineState,
+    Segment,
+    check_fingerprint,
+    read_state,
+    write_state,
+)
 
 SCAN_NOISE_DB = -30.0  # silence threshold used for the whole-file scan
-COMPANION_MIN_SILENCE = 1.5  # length (s) of the short gap that follows a chapter gap
-COMPANION_WINDOW = 10.0  # how soon (s) after a chapter gap the companion appears
-MIN_EARLY_FRACTION = 0.4  # a gap earlier than this share of the word-count estimate is rejected
 AUDIO_CHANNELS = 1  # output is mono ...
 AUDIO_SAMPLE_RATE = 32000  # ... at 32 kHz, which is plenty for narrated speech
 
 ProgressFn = Callable[[float, float], None]
-
-
-class Segment(TypedDict):
-    """One output chapter: a time range of the source audio."""
-
-    n: int
-    title: str
-    start: float
-    end: float
-    duration: float
-
-
-class AlignProgress(TypedDict):
-    """Checkpointed progress of the align stage."""
-
-    boundaries: dict[str, float]  # chapter number (as str, JSON keys) -> start in seconds
-    next: int  # next chapter number to locate
-    low_confidence: list[int]  # chapters whose boundary lacked a companion gap
-    fallback: list[int]  # chapters placed by a fixed offset (no gap found)
-    outro_start: NotRequired[float | None]  # set once the outro search has run
-
-
-class PipelineState(TypedDict):
-    """Checkpoint persisted to ``state.json``; keys appear as stages complete."""
-
-    stage: str  # one of STAGES, or "done"
-    inputs: NotRequired[dict[str, Any]]  # fingerprint of the files/options this state belongs to
-    epub: NotRequired[EpubResult]
-    mp3_duration: NotRequired[float]
-    align: NotRequired[AlignProgress]
-    segments: NotRequired[list[Segment]]
-    assembled_path: NotRequired[str]
-    deliver_bytes_done: NotRequired[int]
-    final_output: NotRequired[str]
-    readaloud_output: NotRequired[str]  # the aligned EPUB 3, once the readaloud stage is done
-
-
-class StateMismatchError(RuntimeError):
-    """A saved checkpoint was made for different input files or options."""
-
-
-def _segment(n: int, title: str, start: float, end: float) -> Segment:
-    """Build a :class:`Segment`, rounding times to milliseconds and computing its duration."""
-    start, end = round(start, 3), round(end, 3)
-    return {"n": n, "title": title, "start": start, "end": end, "duration": round(end - start, 3)}
 
 
 def slugify(s: str) -> str:
@@ -125,6 +93,17 @@ def slugify(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")[:80]
 
 
+def work_name(stem: str) -> str:
+    """Name of a book's folder inside the work directory.
+
+    This is :func:`slugify` of ``stem``, but a stem with nothing slug-worthy
+    (for example only non-ASCII characters) gets a short hash instead of an
+    empty name, which would resolve to the work directory itself.
+    """
+    slug = slugify(stem)
+    return slug or "book_" + hashlib.sha1(stem.encode()).hexdigest()[:10]
+
+
 def safe_filename(s: str, fallback: str = "audiobook") -> str:
     """Make ``s`` usable as a filename while keeping it readable.
 
@@ -133,48 +112,6 @@ def safe_filename(s: str, fallback: str = "audiobook") -> str:
     """
     cleaned = " ".join(re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s).split())[:120].strip(" .")
     return cleaned or fallback
-
-
-def ffmeta_escape(s: str) -> str:
-    """Escape a value for an ``FFMETADATA1`` file (``\\``, ``=``, ``;``, ``#`` and newlines)."""
-    s = s.replace("\r", "").replace("\\", "\\\\")
-    for char in "=;#":
-        s = s.replace(char, "\\" + char)
-    return s.replace("\n", "\\\n")
-
-
-def build_ffmetadata(meta: EpubMeta, segments: list[Segment]) -> str:
-    """Build the ``FFMETADATA1`` text: book tags plus one ``[CHAPTER]`` per segment.
-
-    Args:
-        meta: Book metadata from the EPUB.
-        segments: Contiguous segments in order; times are seconds from the start of the audio.
-
-    Returns:
-        The file contents (newline-terminated).
-    """
-    lines = [
-        ";FFMETADATA1",
-        f"title={ffmeta_escape(meta['title'])}",
-        f"artist={ffmeta_escape(meta['author'])}",
-        f"album={ffmeta_escape(meta['title'])}",
-        f"album_artist={ffmeta_escape(meta['author'])}",
-        "genre=Audiobook",
-    ]
-    if meta.get("year"):
-        lines.append(f"date={ffmeta_escape(meta['year'])}")
-    if meta.get("series"):
-        lines.append(f"show={ffmeta_escape(meta['series'])}")
-        lines.append(f"episode_id={ffmeta_escape(meta['series_index'])}")
-    for s in segments:
-        lines += [
-            "[CHAPTER]",
-            "TIMEBASE=1/1000",
-            f"START={round(s['start'] * 1000)}",
-            f"END={round(s['end'] * 1000)}",
-            f"title={ffmeta_escape(s['title'])}",
-        ]
-    return "\n".join(lines) + "\n"
 
 
 def _same_filesystem(a: Path, b: Path) -> bool:
@@ -314,8 +251,7 @@ class Pipeline:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.work_dir / "state.json"
         self.silences_path = self.work_dir / "silences.json"
-        self._silences: list[tuple[float, float]] | None = None
-        self._silence_ends: list[float] = []
+        self._silences: SilenceIndex | None = None
         self.state: PipelineState = self._load_state()
 
     # ------------------------------------------------------------------ state
@@ -350,16 +286,10 @@ class Pipeline:
             self._save()
             return state
 
-        state = json.loads(self.state_path.read_text())
+        state = read_state(self.state_path)
         saved = state.get("inputs")
         if saved is not None:
-            changed = sorted(k for k in fingerprint if saved.get(k) != fingerprint[k])
-            if changed:
-                raise StateMismatchError(
-                    f"{self.state_path} was made for different input/options "
-                    f"({', '.join(changed)}). Re-run with the original settings, or "
-                    "start over (delete the work directory / use --fresh)."
-                )
+            check_fingerprint(self.state_path, saved, fingerprint)
         else:  # checkpoint from an older version: adopt it
             state["inputs"] = fingerprint
 
@@ -387,9 +317,7 @@ class Pipeline:
 
     def _save(self) -> None:
         """Atomically write the in-memory state to ``state_path``."""
-        tmp = self.state_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.state, indent=2, ensure_ascii=False))
-        tmp.replace(self.state_path)
+        write_state(self.state_path, self.state)
 
     # --------------------------------------------------------- typed accessors
     def _epub(self) -> EpubResult:
@@ -452,12 +380,14 @@ class Pipeline:
         n = len(result["chapters"])
         logger.info(
             f"extracted: {result['meta']['title']} by {result['meta']['author']}, "
-            f"{n} chapters, cover={'yes' if result['cover'] else 'no'}")
+            f"{n} chapters, cover={'yes' if result['cover'] else 'no'}"
+        )
         avg = duration / n
         if avg < 90 or avg > 2700:
             logger.warning(
                 f"{n} chapters over {duration / 3600:.1f} h averages {avg / 60:.1f} min per "
-                "chapter -- is this the right EPUB for this audio?")
+                "chapter -- is this the right EPUB for this audio?"
+            )
         return True
 
     # ------------------------------------------------------------------- scan
@@ -500,77 +430,18 @@ class Pipeline:
         except (OSError, ValueError):
             return None
 
-    def _get_silences(self) -> list[tuple[float, float]]:
-        """Return the cached scan (loading it on first use)."""
+    def _get_silences(self) -> SilenceIndex:
+        """Return the cached scan as a searchable index (loading it on first use)."""
         if self._silences is None:
             data = self._read_silences_file()
             if data is None:
                 raise FileNotFoundError(f"{self.silences_path} is missing; re-run the scan stage")
-            self._silences = [(float(s), float(e)) for s, e in data["silences"]]
-            self._silence_ends = [e for _s, e in self._silences]
+            self._silences = SilenceIndex(
+                [(float(s), float(e)) for s, e in data["silences"]], self.min_gap
+            )
         return self._silences
 
     # ------------------------------------------------------------------ align
-    def _find_gap(
-        self,
-        after: float,
-        total_dur: float,
-        max_span: float = 4200.0,
-        min_offset: float = 0.0,
-    ) -> tuple[float | None, str, int]:
-        """Find the first chapter-transition silence after ``after``.
-
-        Looks at silences starting 3 s after ``after`` and within ``max_span``
-        seconds of that. The midpoint of the first silence of at least
-        ``min_gap`` seconds (measured inside that range) whose midpoint is at
-        least ``min_offset`` after ``after`` is returned. Confidence is
-        ``"high"`` if a companion gap follows within 10 s, else ``"low"``.
-
-        Args:
-            after: Position (s) of the previous boundary to search from.
-            total_dur: Total audio duration (s).
-            max_span: Longest stretch (s) to search.
-            min_offset: Skip gaps whose midpoint is closer than this to ``after``
-                (used to reject pauses inside a chapter).
-
-        Returns:
-            ``(position, confidence, skipped)``: confidence is ``"high"`` or
-            ``"low"``; ``skipped`` counts qualifying gaps rejected as too early.
-            ``(None, "eof", 0)`` if the search started at end of file, or
-            ``(None, "fallback", skipped)`` if no gap was found.
-        """
-        clip_start = after + 3.0
-        if clip_start >= total_dur:
-            return None, "eof", 0
-        clip_end = min(clip_start + max_span, total_dur)
-        silences = self._get_silences()
-        skipped = 0
-        k = bisect.bisect_right(self._silence_ends, clip_start)
-        while k < len(silences):
-            s, e = silences[k]
-            if s >= clip_end:
-                break
-            s, e_clamped = max(s, clip_start), min(e, clip_end)
-            if e_clamped - s >= self.min_gap:
-                mid = (s + e_clamped) / 2
-                if mid - after < min_offset:
-                    skipped += 1
-                else:
-                    return mid, ("high" if self._has_companion(k, e_clamped) else "low"), skipped
-            k += 1
-        return None, "fallback", skipped
-
-    def _has_companion(self, k: int, gap_end: float) -> bool:
-        """Whether a short companion silence follows silence ``k`` within 10 s of ``gap_end``."""
-        silences = self._get_silences()
-        window_end = gap_end + COMPANION_WINDOW
-        for s2, e2 in silences[k + 1 :]:
-            if s2 >= window_end:
-                break
-            if min(e2, window_end) - max(s2, gap_end) >= COMPANION_MIN_SILENCE:
-                return True
-        return False
-
     def stage_align(self, budget: float) -> bool:
         """Locate chapter boundaries by chaining silence lookups forward.
 
@@ -601,7 +472,9 @@ class Pipeline:
                 # no intro at all would have chapter 1's own internal
                 # transition gap mistaken for "end of intro", silently
                 # shifting every chapter label by one for the whole book.
-                found, _conf, _skipped = self._find_gap(0.0, total_dur, max_span=600.0)
+                found, _conf, _skipped = self._get_silences().find_gap(
+                    0.0, total_dur, max_span=600.0
+                )
                 if found is not None and found <= self.intro_max_len:
                     actual = found
             align["boundaries"]["1"] = actual
@@ -615,23 +488,25 @@ class Pipeline:
             # Chapter i-1 spans prev_actual..(this boundary); a gap far shorter
             # than its word count implies is a pause inside the chapter.
             min_offset = chapters[i - 2]["word_count"] * secs_per_word * MIN_EARLY_FRACTION
-            actual_or_none, confidence, skipped = self._find_gap(
+            actual_or_none, confidence, skipped = self._get_silences().find_gap(
                 prev_actual, total_dur, min_offset=min_offset
             )
             if skipped:
                 logger.info(
                     f"chapter {i}: ignored {skipped} gap(s) earlier than "
-                    f"{min_offset:.0f}s after the previous chapter (scene break?)")
+                    f"{min_offset:.0f}s after the previous chapter (scene break?)"
+                )
             if actual_or_none is None:
                 if prev_actual >= total_dur - 1.0:
                     raise RuntimeError(
                         f"ran out of audio before chapter {i} ({chapters[i - 1]['title']!r}): "
                         f"the EPUB has {n_chapters} chapters but the audio ends too soon"
                     )
-                actual = min(prev_actual + 900.0, total_dur)
+                actual = min(prev_actual + FALLBACK_SPAN, total_dur)
                 align["fallback"].append(i)
                 logger.warning(
-                    f"chapter {i}: no chapter gap found ({confidence}); placed at {actual:.0f}s")
+                    f"chapter {i}: no chapter gap found ({confidence}); placed at {actual:.0f}s"
+                )
             else:
                 actual = actual_or_none
                 if confidence == "low":
@@ -650,7 +525,7 @@ class Pipeline:
             outro_start = None
             if self.detect_outro:
                 last_actual = align["boundaries"][str(n_chapters)]
-                candidate, _conf, _skipped = self._find_gap(
+                candidate, _conf, _skipped = self._get_silences().find_gap(
                     last_actual, total_dur, max_span=self.outro_max_search
                 )
                 # Only trust it as "start of outro" if what's left after it
@@ -664,7 +539,8 @@ class Pipeline:
 
         logger.debug(
             f"align: {align['next'] - 1}/{n_chapters} chapters "
-            f"(low_confidence={len(align['low_confidence'])} fallback={len(align['fallback'])})")
+            f"(low_confidence={len(align['low_confidence'])} fallback={len(align['fallback'])})"
+        )
 
         if done and "outro_start" in align:
             self.state["stage"] = "assemble"
@@ -680,48 +556,27 @@ class Pipeline:
         warns about any segment whose length deviates more than 30% from what
         its EPUB word count predicts.
         """
-        chapters = self._epub()["chapters"]
         align = self._align()
-        total_dur = self._duration()
-        segments: list[Segment] = []
-        words: list[int | None] = []  # parallel to segments; None for intro/outro
-        idx = 0
-        if align["boundaries"]["1"] > 5.0:  # meaningful intro exists
-            segments.append(_segment(idx, self.intro_title, 0.0, align["boundaries"]["1"]))
-            words.append(None)
-            idx += 1
-        for i, c in enumerate(chapters, start=1):
-            start = align["boundaries"][str(i)]
-            if i < len(chapters):
-                end = align["boundaries"][str(i + 1)]
-            else:
-                end = align.get("outro_start") or total_dur
-            segments.append(_segment(idx, c["title"], start, end))
-            words.append(c["word_count"])
-            idx += 1
-        outro_start = align.get("outro_start")
-        if outro_start and (total_dur - outro_start) > 2.0:
-            segments.append(_segment(idx, self.outro_title, outro_start, total_dur))
-            words.append(None)
+        segments = build_segments(
+            self._epub()["chapters"],
+            align["boundaries"],
+            total_dur=self._duration(),
+            outro_start=align.get("outro_start"),
+            intro_title=self.intro_title,
+            outro_title=self.outro_title,
+            low_confidence=align["low_confidence"],
+            fallback=align["fallback"],
+        )
         self.state["segments"] = segments
         self._save()
 
-        # sanity check against word counts
-        total_words = sum(w for w in words if w)
-        speech = sum(s["duration"] for s, w in zip(segments, words, strict=True) if w is not None)
-        rate = speech / total_words if total_words else 0
-        flagged = []
-        for s, wc in zip(segments, words, strict=True):
-            if wc is None:
-                continue
-            exp = wc * rate
-            if exp > 0 and abs(s["duration"] - exp) / exp > 0.30:
-                flagged.append((s["n"], s["title"], round(s["duration"], 1), round(exp, 1)))
+        flagged = deviating_segments(segments)
         if flagged:
             detail = "; ".join(f"#{n} {t!r}: {d}s vs ~{e}s" for n, t, d, e in flagged)
             logger.warning(
                 f"{len(flagged)} segment(s) deviate >30% from the word-count estimate "
-                f"(possible merged/skipped chapter) -- review before trusting output: {detail}")
+                f"(possible merged/skipped chapter) -- review before trusting output: {detail}"
+            )
 
     # --------------------------------------------------------------- assemble
     def stage_assemble(self, budget: float) -> bool:
@@ -797,7 +652,8 @@ class Pipeline:
         out_dur = ffprobe_duration(final_path)
         if abs(out_dur - total) > 3.0:
             logger.warning(
-                f"output is {out_dur:.1f}s but the source is {total:.1f}s -- check the result")
+                f"output is {out_dur:.1f}s but the source is {total:.1f}s -- check the result"
+            )
 
         self.state["assembled_path"] = str(final_path)
         self.state["stage"] = "deliver"

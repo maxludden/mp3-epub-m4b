@@ -4,15 +4,16 @@ Generalized EPUB chapter/metadata extraction.
 Works for any EPUB2 (toc.ncx) or EPUB3 (nav.xhtml) book, not just this
 series. The package document is parsed as XML (namespaces, entities and
 URL-encoded hrefs are handled properly). Chapter detection strategy:
-  1. Preferred: TOC entries whose label matches "<number>. <title>" (the
-     common pattern for numbered-chapter fiction, incl. this publisher).
-  2. Fallback: every spine item NOT matching a front/back-matter title
-     blocklist (title page, copyright, contents, acknowledgments, also-by,
-     about the author, etc.), taken in spine order.
+    1. Preferred: TOC entries whose label matches "<number>. <title>" (the
+        common pattern for numbered-chapter fiction, incl. this publisher).
+    2. Fallback: every spine item NOT matching a front/back-matter title
+        blocklist (title page, copyright, contents, acknowledgments, also-by,
+        about the author, etc.), taken in spine order.
 
 Always prints a summary (chapter count + first/last titles) so a human
 can sanity-check before the rest of the pipeline runs on it.
 """
+
 from __future__ import annotations
 
 import posixpath
@@ -31,7 +32,7 @@ from lxml import etree
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from audiobook_kit.log import console, setup_logging
+from mp3_epub_m4b.log import console, setup_logging
 
 
 class EpubMeta(TypedDict):
@@ -70,23 +71,47 @@ class ManifestItem(NamedTuple):
 
 
 app = typer.Typer(
-    help="Extract chapters, metadata and cover from an EPUB.",
+    help="Extract chapters, metadata and cover for an MP3/M4A audiobook from an EPUB to generate an M4B.",
     add_completion=False,
+    rich_markup_mode="rich",
 )
 
 # Headings that mark front/back matter. A heading matches if it equals an
 # EXACT entry or starts with a PREFIX entry (after normalising case and
 # punctuation). Whole-heading matching keeps real chapters such as "Cover
 # Fire" or "The Map Room" from being dropped.
-FRONT_BACK_MATTER_EXACT = frozenset({
-    "cover", "title page", "titlepage", "copyright", "contents", "table of contents",
-    "dedication", "afterword", "map", "maps", "glossary", "appendix", "preview",
-    "discord", "newsletter", "groups",
-})
+FRONT_BACK_MATTER_EXACT = frozenset(
+    {
+        "cover",
+        "title page",
+        "titlepage",
+        "copyright",
+        "contents",
+        "table of contents",
+        "dedication",
+        "afterword",
+        "map",
+        "maps",
+        "glossary",
+        "appendix",
+        "preview",
+        "discord",
+        "newsletter",
+        "groups",
+    }
+)
 FRONT_BACK_MATTER_PREFIXES = (
-    "also by", "acknowledg", "about the author", "epilogue note", "author's note",
-    "a note from the author", "thank you for reading", "sneak peek", "preview of",
-    "table of contents", "copyright",
+    "also by",
+    "acknowledg",
+    "about the author",
+    "epilogue note",
+    "author's note",
+    "a note from the author",
+    "thank you for reading",
+    "sneak peek",
+    "preview of",
+    "table of contents",
+    "copyright",
 )
 
 NUMBERED_RE = re.compile(r"^\s*(?:chapter\s+)?(\d+)\s*[\.\):\-–—]\s*(.+?)\s*$", re.I)
@@ -265,9 +290,7 @@ def _extract_metadata(root: etree._Element) -> EpubMeta:
     }
 
 
-def _find_cover(
-    root: etree._Element, manifest: dict[str, ManifestItem], base: Path
-) -> Path | None:
+def _find_cover(root: etree._Element, manifest: dict[str, ManifestItem], base: Path) -> Path | None:
     """Find the cover image path, or ``None``.
 
     Tries, in order: the EPUB 3 ``cover-image`` manifest property, the EPUB 2
@@ -279,7 +302,8 @@ def _find_cover(
         if _local(el) == "meta" and el.get("name") == "cover" and el.get("content"):
             candidates.append(el.get("content") or "")
     candidates += [
-        i for i, it in manifest.items()
+        i
+        for i, it in manifest.items()
         if "cover" in i.lower() and re.search(r"\.(jpe?g|png)$", it.href, re.I)
     ]
     for item_id in candidates:
@@ -474,7 +498,7 @@ def main(
         result = extract_epub(epub, work_dir)
         out.write_text(json.dumps(result, indent=2, ensure_ascii=False))
 
-    meta = result["meta"]
+    meta: EpubMeta = result["meta"]
     info = Table.grid(padding=(0, 2))
     info.add_row("[bold]title[/bold]", meta["title"])
     info.add_row("[bold]author[/bold]", meta["author"])
@@ -492,7 +516,7 @@ def main(
         table.add_row(str(c["n"]), c["title"], str(c["word_count"]))
     if len(chapters) > 6:
         table.add_row("...", "...", "...")
-    for c in chapters[max(3, len(chapters) - 3):]:
+    for c in chapters[max(3, len(chapters) - 3) :]:
         table.add_row(str(c["n"]), c["title"], str(c["word_count"]))
     console.print(table)
     logger.success(f"wrote {out}")

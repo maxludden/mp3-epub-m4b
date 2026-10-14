@@ -8,15 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from audiobook_kit.align_chapters import scan_silences
-from audiobook_kit.run import Pipeline, PipelineState, StateMismatchError
-from audiobook_kit.stalign import AlignError, AlignOptions
+from mp3_epub_m4b.align import AlignError, AlignOptions
+from mp3_epub_m4b.ffmpeg_tools import scan_silences
+from mp3_epub_m4b.run import Pipeline
+from mp3_epub_m4b.state import PipelineState, StateMismatchError
 
-from .conftest import CHAPTERS, expected_boundaries, needs_ffmpeg
+from .conftest import CHAPTERS, expected_boundaries
 
 
-def make_pipeline(tmp_path: Path, mp3: Path | None = None, epub: Path | None = None,
-                  work: Path | None = None, out: Path | None = None, **kw) -> Pipeline:
+def make_pipeline(
+    tmp_path: Path,
+    mp3: Path | None = None,
+    epub: Path | None = None,
+    work: Path | None = None,
+    out: Path | None = None,
+    **kw,
+) -> Pipeline:
     """Build a Pipeline with dummy input files unless real ones are given."""
     if mp3 is None:
         mp3 = tmp_path / "a.mp3"
@@ -24,18 +31,37 @@ def make_pipeline(tmp_path: Path, mp3: Path | None = None, epub: Path | None = N
     if epub is None:
         epub = tmp_path / "b.epub"
         epub.write_bytes(b"x")
-    return Pipeline(mp3, epub, out or tmp_path / "out", work or tmp_path / "work", 3.5,
-                    "Opening Credits", "End Credits", 1800.0, "64k", **kw)
+    return Pipeline(
+        mp3,
+        epub,
+        out or tmp_path / "out",
+        work or tmp_path / "work",
+        3.5,
+        "Opening Credits",
+        "End Credits",
+        1800.0,
+        "64k",
+        **kw,
+    )
 
 
-def prime_align(p: Pipeline, silences: list[tuple[float, float]], words: list[int],
-                total: float) -> None:
+def prime_align(
+    p: Pipeline, silences: list[tuple[float, float]], words: list[int], total: float
+) -> None:
     """Put a pipeline straight into the align stage with a fake scan and fake chapters."""
-    p.silences_path.write_text(json.dumps({"noise_db": -30, "min_silence": 1.5, "silences": silences}))
+    p.silences_path.write_text(
+        json.dumps({"noise_db": -30, "min_silence": 1.5, "silences": silences})
+    )
     state: PipelineState = p.state
     state["epub"] = {
-        "meta": {"title": "T", "author": "A", "publisher": "", "year": "", "series": "",
-                 "series_index": ""},
+        "meta": {
+            "title": "T",
+            "author": "A",
+            "publisher": "",
+            "year": "",
+            "series": "",
+            "series_index": "",
+        },
         "cover": None,
         "chapters": [{"n": i, "title": f"Ch{i}", "word_count": w} for i, w in enumerate(words, 1)],
     }
@@ -69,8 +95,17 @@ def test_fallback_overrun_raises(tmp_path: Path) -> None:
 def test_state_mismatch(tmp_path: Path) -> None:
     make_pipeline(tmp_path)
     with pytest.raises(StateMismatchError, match="min_gap"):
-        Pipeline(tmp_path / "a.mp3", tmp_path / "b.epub", tmp_path / "out", tmp_path / "work",
-                 2.0, "Opening Credits", "End Credits", 1800.0, "64k")
+        Pipeline(
+            tmp_path / "a.mp3",
+            tmp_path / "b.epub",
+            tmp_path / "out",
+            tmp_path / "work",
+            2.0,
+            "Opening Credits",
+            "End Credits",
+            1800.0,
+            "64k",
+        )
 
 
 def test_unknown_stage_raises(tmp_path: Path) -> None:
@@ -81,7 +116,7 @@ def test_unknown_stage_raises(tmp_path: Path) -> None:
 
 
 def test_deliver_copy_is_resumable_and_refuses_overwrite(tmp_path: Path, monkeypatch) -> None:
-    from audiobook_kit import run as run_mod
+    from mp3_epub_m4b import run as run_mod
 
     monkeypatch.setattr(run_mod, "_same_filesystem", lambda a, b: False)  # force the copy path
     p = make_pipeline(tmp_path)
@@ -111,7 +146,9 @@ def test_deliver_copy_is_resumable_and_refuses_overwrite(tmp_path: Path, monkeyp
 def _fake_align(calls: list[Path], fail: bool = False):
     """Stand-in for ``align_book`` that records its output path and writes a file there."""
 
-    def fake(audio: Path, epub: Path, out: Path | None = None, opts: AlignOptions | None = None) -> Path:
+    def fake(
+        audio: Path, epub: Path, out: Path | None = None, opts: AlignOptions | None = None
+    ) -> Path:
         assert out is not None
         calls.append(out)
         out.write_bytes(b"partial")
@@ -123,7 +160,7 @@ def _fake_align(calls: list[Path], fail: bool = False):
 
 
 def test_readaloud_runs_after_deliver(tmp_path: Path, monkeypatch) -> None:
-    from audiobook_kit import run as run_mod
+    from mp3_epub_m4b import run as run_mod
 
     calls: list[Path] = []
     monkeypatch.setattr(run_mod, "align_book", _fake_align(calls))
@@ -152,8 +189,10 @@ def test_readaloud_disabled_by_default(tmp_path: Path) -> None:
     assert p.state["stage"] == "done"
 
 
-def test_readaloud_failure_keeps_stage_and_leaves_no_final_file(tmp_path: Path, monkeypatch) -> None:
-    from audiobook_kit import run as run_mod
+def test_readaloud_failure_keeps_stage_and_leaves_no_final_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from mp3_epub_m4b import run as run_mod
 
     monkeypatch.setattr(run_mod, "align_book", _fake_align([], fail=True))
     p = make_pipeline(tmp_path, readaloud=AlignOptions())
@@ -175,7 +214,7 @@ def test_finished_book_gets_readaloud_on_rerun(tmp_path: Path) -> None:
     assert again.state["stage"] == "readaloud"
 
 
-@needs_ffmpeg
+@pytest.mark.ffmpeg
 def test_scan_silences_finds_known_gaps(synthetic_book) -> None:
     mp3, _epub, duration = synthetic_book
     seen: list[float] = []
@@ -185,7 +224,7 @@ def test_scan_silences_finds_known_gaps(synthetic_book) -> None:
     assert seen and seen[-1] == pytest.approx(duration)
 
 
-@needs_ffmpeg
+@pytest.mark.ffmpeg
 def test_end_to_end(tmp_path: Path, synthetic_book, logs: list[tuple[str, str]]) -> None:
     mp3, epub, duration = synthetic_book
     p = make_pipeline(tmp_path, mp3, epub)
@@ -202,9 +241,24 @@ def test_end_to_end(tmp_path: Path, synthetic_book, logs: list[tuple[str, str]])
     # no stray intermediates left under the final name
     assert not list(out.parent.glob("*.part")) and not list(out.parent.glob("*.tmp"))
 
-    probe = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-show_chapters", "-show_format", "-show_streams",
-         "-of", "json", str(out)], capture_output=True, text=True, check=True).stdout)
+    probe = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_chapters",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
     chapters = probe["chapters"]
     assert [c["tags"]["title"] for c in chapters] == [ch.title for ch in CHAPTERS]
     starts = [float(c["start_time"]) for c in chapters]
@@ -273,7 +327,7 @@ def test_deliver_resumes_after_crash_before_src_removed(tmp_path: Path) -> None:
 def test_cli_defaults_and_slice_validation() -> None:
     from typer.testing import CliRunner
 
-    from audiobook_kit.cli import app
+    from mp3_epub_m4b.cli import app
 
     result = CliRunner().invoke(app, ["convert", __file__, __file__, "--slice-seconds", "0"])
     assert result.exit_code != 0 and "slice-seconds" in result.output.lower().replace("_", "-")
@@ -282,3 +336,38 @@ def test_cli_defaults_and_slice_validation() -> None:
     for name in ("convert", "batch"):
         params = {q.name: q.default for q in typer.main.get_command(app).commands[name].params}  # type: ignore[attr-defined]
         assert params["detect_intro"] is False and params["detect_outro"] is False
+
+
+def test_stale_resume_fingerprint_rejects_changed_input(tmp_path: Path) -> None:
+    mp3 = tmp_path / "a.mp3"
+    mp3.write_bytes(b"x")
+    make_pipeline(tmp_path, mp3=mp3)
+    mp3.write_bytes(b"a much longer, different recording")  # same name, new size
+    with pytest.raises(StateMismatchError, match="mp3_size"):
+        make_pipeline(tmp_path, mp3=mp3)
+
+
+def test_stale_resume_accepts_identical_input(tmp_path: Path) -> None:
+    p = make_pipeline(tmp_path)
+    p.state["stage"] = "scan"
+    p._save()
+    assert make_pipeline(tmp_path).state["stage"] == "scan"
+
+
+def test_boundary_never_lands_beyond_the_end_of_the_audio(tmp_path: Path) -> None:
+    p = make_pipeline(tmp_path)
+    # a silence that runs well past EOF (as a trailing-silence scan can report)
+    prime_align(p, [(190.0, 260.0)], [1000, 1000], 200.0)
+    p.stage_align(60)
+    assert 0.0 < p._align()["boundaries"]["2"] < 200.0
+
+
+def test_deliver_never_overwrites_without_the_flag(tmp_path: Path) -> None:
+    p, _src = _deliver_pipeline(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "Book.m4b").write_bytes(b"existing")
+    with pytest.raises(FileExistsError, match="already exists"):
+        p.stage_deliver(5.0)
+    assert (out / "Book.m4b").read_bytes() == b"existing"
+    assert p.state["stage"] == "deliver"  # nothing advanced

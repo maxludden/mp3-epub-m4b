@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from audiobook_kit import stalign as align_mod
-from audiobook_kit.cli import app
-from audiobook_kit.stalign import (
+from mp3_epub_m4b import align as align_mod
+from mp3_epub_m4b.align import (
     AlignError,
     AlignOptions,
     align_book,
     build_command,
     default_output,
 )
+from mp3_epub_m4b.cli import app
 
 
 def test_default_output_sits_next_to_epub() -> None:
@@ -23,15 +23,23 @@ def test_default_output_sits_next_to_epub() -> None:
 
 
 def test_build_command_ctc_defaults() -> None:
-    cmd = build_command(Path("align"), Path("/audio"), Path("b.epub"), Path("o.epub"), AlignOptions())
+    cmd = build_command(
+        Path("align"), Path("/audio"), Path("b.epub"), Path("o.epub"), AlignOptions()
+    )
     assert "--ctc" in cmd and "--no-progress" in cmd
     assert "--engine" not in cmd and "--device" not in cmd
     assert cmd[cmd.index("-g") + 1] == "sentence"
 
 
 def test_build_command_engine_skips_ctc_and_device() -> None:
-    opts = AlignOptions(engine="whisper.cpp", model="small", device="cpu", progress=True,
-                        codec="aac", extra=["--foo"])
+    opts = AlignOptions(
+        engine="whisper.cpp",
+        model="small",
+        device="cpu",
+        progress=True,
+        codec="aac",
+        extra=["--foo"],
+    )
     cmd = build_command(Path("align"), Path("/audio"), Path("b.epub"), Path("o.epub"), opts)
     assert "--ctc" not in cmd and "--device" not in cmd and "--no-progress" not in cmd
     assert cmd[cmd.index("--engine") + 1] == "whisper.cpp"
@@ -97,7 +105,7 @@ def test_ensure_installed_writes_valid_package_json(tmp_path: Path, monkeypatch)
 
     calls: list[list[str]] = []
     monkeypatch.setattr(align_mod.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
-    tool_dir = tmp_path / ".audiobook-kit-align"
+    tool_dir = tmp_path / ".mp3-epub-m4b-align"
     align_mod.ensure_installed(Path("/usr/bin/node"), tool_dir)
-    assert json.loads((tool_dir / "package.json").read_text())["name"] == "audiobook-kit-align"
+    assert json.loads((tool_dir / "package.json").read_text())["name"] == "mp3-epub-m4b-align"
     assert len(calls) == 1 and calls[0][1] == "install"

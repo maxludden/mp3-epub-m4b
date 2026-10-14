@@ -12,10 +12,17 @@ from typing import NamedTuple
 import pytest
 from loguru import logger
 
-needs_ffmpeg = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-    reason="ffmpeg/ffprobe not installed",
-)
+HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skip tests marked ``ffmpeg`` when ffmpeg/ffprobe aren't installed."""
+    if HAVE_FFMPEG:
+        return
+    skip = pytest.mark.skip(reason="ffmpeg/ffprobe not installed")
+    for item in items:
+        if "ffmpeg" in item.keywords:
+            item.add_marker(skip)
 
 
 class ChapterSpec(NamedTuple):
@@ -58,33 +65,59 @@ def make_audio(path: Path) -> float:
     for i, ch in enumerate(CHAPTERS):
         freq = 300 + 150 * i
         if i == 1:
-            parts += [f"sine=f={freq}:d={SCENE_AT}", f"anullsrc=r=22050:cl=mono:d={SCENE_GAP}",
-                      f"sine=f={freq}:d={ch.seconds - SCENE_AT}"]
+            parts += [
+                f"sine=f={freq}:d={SCENE_AT}",
+                f"anullsrc=r=22050:cl=mono:d={SCENE_GAP}",
+                f"sine=f={freq}:d={ch.seconds - SCENE_AT}",
+            ]
         else:
             parts.append(f"sine=f={freq}:d={ch.seconds}")
         if i < len(CHAPTERS) - 1:
-            parts += [f"anullsrc=r=22050:cl=mono:d={GAP}", f"sine=f=900:d={STING}",
-                      f"anullsrc=r=22050:cl=mono:d={COMPANION}"]
+            parts += [
+                f"anullsrc=r=22050:cl=mono:d={GAP}",
+                f"sine=f=900:d={STING}",
+                f"anullsrc=r=22050:cl=mono:d={COMPANION}",
+            ]
     cmd = ["ffmpeg", "-y", "-nostdin", "-loglevel", "error"]
     for p in parts:
         cmd += ["-f", "lavfi", "-i", p]
-    labels = "".join(f"[{k}:a]aformat=sample_rates=22050:channel_layouts=mono[a{k}];"
-                     for k in range(len(parts)))
+    labels = "".join(
+        f"[{k}:a]aformat=sample_rates=22050:channel_layouts=mono[a{k}];" for k in range(len(parts))
+    )
     concat_in = "".join(f"[a{k}]" for k in range(len(parts)))
-    cmd += ["-filter_complex", f"{labels}{concat_in}concat=n={len(parts)}:v=0:a=1[out]",
-            "-map", "[out]", "-b:a", "64k", str(path)]
+    cmd += [
+        "-filter_complex",
+        f"{labels}{concat_in}concat=n={len(parts)}:v=0:a=1[out]",
+        "-map",
+        "[out]",
+        "-b:a",
+        "64k",
+        str(path),
+    ]
     subprocess.run(cmd, check=True)
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-        capture_output=True, text=True, check=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return float(out.stdout)
 
 
 def make_epub(path: Path, with_cover: bool = True) -> None:
     """Write a small EPUB 3 with a nav in a subfolder, URL-encoded hrefs and an XML entity."""
-    opf_items = ['<item id="nav" href="nav/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>']
+    opf_items = [
+        '<item id="nav" href="nav/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+    ]
     spine = []
     nav_links = []
     files: dict[str, str | bytes] = {}
@@ -106,12 +139,26 @@ def make_epub(path: Path, with_cover: bool = True) -> None:
     if with_cover:
         cover = path.parent / "cover.jpg"
         subprocess.run(
-            ["ffmpeg", "-y", "-nostdin", "-loglevel", "error", "-f", "lavfi",
-             "-i", "color=c=red:s=64x64:d=1", "-frames:v", "1", str(cover)],
+            [
+                "ffmpeg",
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x64:d=1",
+                "-frames:v",
+                "1",
+                str(cover),
+            ],
             check=True,
         )
         files["OEBPS/images/cover.jpg"] = cover.read_bytes()
-        opf_items.append('<item id="cover-img" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>')
+        opf_items.append(
+            '<item id="cover-img" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>'
+        )
         cover_meta = ""
     files["OEBPS/nav/nav.xhtml"] = (
         "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops'><body>"
@@ -146,7 +193,7 @@ def make_epub(path: Path, with_cover: bool = True) -> None:
 def logs() -> Iterator[list[tuple[str, str]]]:
     """Capture the library's loguru output as ``(level, message)`` pairs."""
     captured: list[tuple[str, str]] = []
-    logger.enable("audiobook_kit")
+    logger.enable("mp3_epub_m4b")
     handler = logger.add(
         lambda m: captured.append((m.record["level"].name.lower(), m.record["message"])),
         level="DEBUG",
@@ -154,7 +201,7 @@ def logs() -> Iterator[list[tuple[str, str]]]:
     )
     yield captured
     logger.remove(handler)
-    logger.disable("audiobook_kit")
+    logger.disable("mp3_epub_m4b")
 
 
 @pytest.fixture(scope="session")

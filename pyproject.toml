@@ -1,26 +1,42 @@
 [project]
-name = "audiobook-kit"
+name = "mp3-epub-m4b"
 version = "0.1.0"
 description = "Convert single-file audiobooks plus EPUBs into chaptered M4B files"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Maxwell Ludden", email = "maxludden@gmail.com" }]
+keywords = ["audiobook", "m4b", "epub", "ffmpeg", "chapters"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+]
 requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4",
     "loguru>=0.7",
     "lxml",
+    "python-dotenv>=1.2.4",
     "rich>=13",
-    "rich-gradient>=0.3.13",
     "typer>=0.12",
 ]
 
+[project.urls]
+Homepage = "https://github.com/maxludden/mp3-epub-m4b"
+Repository = "https://github.com/maxludden/mp3-epub-m4b"
+Issues = "https://github.com/maxludden/mp3-epub-m4b/issues"
+
 [project.scripts]
-audiobook-kit = "audiobook_kit.cli:main"
+mp3-epub-m4b = "mp3_epub_m4b.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/audiobook_kit"]
+packages = ["src/mp3_epub_m4b"]
 
 [dependency-groups]
 dev = [
@@ -32,6 +48,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["ffmpeg: needs ffmpeg and ffprobe on PATH (skipped when they are missing)"]
 
 [tool.mypy]
 python_version = "3.12"

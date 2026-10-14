@@ -1,11 +1,12 @@
 #!/bin/zsh
 # One-time (idempotent) machine setup: ffmpeg, uv, Node >= 24, the readaloud aligner,
 # and a local venv for the kit.
-# The venv lives on local disk (not iCloud): ~/.audiobook-kit-venv
+# The venv lives in ~/.mp3-epub-m4b-venv by default (override with MP3_EPUB_M4B_VENV);
+# keep it off synced folders such as iCloud Drive.
 set -u
 
 KIT_DIR="${0:A:h}"
-VENV="${AUDIOBOOK_KIT_VENV:-$HOME/.audiobook-kit-venv}"
+VENV="${MP3_EPUB_M4B_VENV:-$HOME/.mp3-epub-m4b-venv}"
 
 command -v brew >/dev/null || { echo "Homebrew is required: https://brew.sh"; exit 1; }
 command -v ffmpeg >/dev/null || brew install ffmpeg || exit 1
@@ -18,8 +19,8 @@ if ! node_ok && ! [[ -x /opt/homebrew/bin/node && $(/opt/homebrew/bin/node -p 'p
 fi
 
 UV_PROJECT_ENVIRONMENT="$VENV" uv sync --project "$KIT_DIR" --no-dev || exit 1
-"$VENV/bin/audiobook-kit" --help >/dev/null || { echo "install check failed"; exit 1; }
-# Install the aligner into ~/.audiobook-kit-align now (no-op if already there).
-"$VENV/bin/python" -c "from audiobook_kit.stalign import ensure_installed, find_node; ensure_installed(find_node())" \
+"$VENV/bin/mp3-epub-m4b" --help >/dev/null || { echo "install check failed"; exit 1; }
+# Install the aligner into ~/.mp3-epub-m4b-align now (no-op if already there).
+"$VENV/bin/python" -c "from mp3_epub_m4b.stalign import ensure_installed, find_node; ensure_installed(find_node())" \
   || { echo "aligner install failed"; exit 1; }
 echo "ready — try: ./convert.sh <audio> <epub>"
