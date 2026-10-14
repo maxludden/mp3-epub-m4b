@@ -136,3 +136,29 @@ def test_segment_times_are_rounded_to_milliseconds(seconds: float) -> None:
         outro_title="o",
     )[0]
     assert seg["end"] == round(seconds + 0.12345, 3)
+
+
+def test_find_gap_and_build_segments_log_their_decisions() -> None:
+    from loguru import logger
+
+    messages: list[str] = []
+    logger.enable("mp3_epub_m4b")
+    sink = logger.add(lambda m: messages.append(m.record["message"]), level="DEBUG")
+    try:
+        idx = SilenceIndex([(100.0, 104.0)], min_gap=3.5)
+        idx.find_gap(0.0, 200.0)
+        idx.find_gap(150.0, 200.0)
+        build_segments(
+            CHAPTERS,
+            {"1": 10.0, "2": 100.0},
+            total_dur=200.0,
+            outro_start=None,
+            intro_title="Intro",
+            outro_title="Outro",
+        )
+    finally:
+        logger.remove(sink)
+        logger.disable("mp3_epub_m4b")
+    assert any("gap at 102.0s" in m for m in messages)
+    assert any("no gap found after 150.0s" in m for m in messages)
+    assert any("built 3 segments" in m for m in messages)

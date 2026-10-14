@@ -60,12 +60,14 @@ def pair_files(
     epub_re = re.compile(epub_pattern)
     audio: dict[int, Path] = {}
     epubs: dict[int, Path] = {}
+    logger.debug(f"pairing files in {folder} (audio /{audio_pattern}/, epub /{epub_pattern}/)")
     for f in sorted(folder.iterdir()):
         suffix = f.suffix.lower()
         if suffix in AUDIO_SUFFIXES and (m := audio_re.fullmatch(f.stem)):
             add_numbered(audio, _number(m), f)
         elif suffix == ".epub" and (m := epub_re.search(f.stem)):
             add_numbered(epubs, _number(m), f)
+    logger.debug(f"numbered: {len(audio)} audio file(s), {len(epubs)} epub(s)")
     return audio, epubs
 
 
@@ -93,4 +95,6 @@ def pair_by_name(
             audio.setdefault(key, f)
         elif suffix == ".epub" and f not in skip_epubs:
             epubs.setdefault(key, f)
-    return [(audio[k].stem, audio[k], epubs[k]) for k in sorted(audio.keys() & epubs.keys())]
+    pairs = [(audio[k].stem, audio[k], epubs[k]) for k in sorted(audio.keys() & epubs.keys())]
+    logger.debug(f"matched {len(pairs)} identically named pair(s) in {folder}")
+    return pairs

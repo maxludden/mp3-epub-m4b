@@ -100,6 +100,7 @@ def convert_book(audio: Path, epub: Path | None, out_dir: Path, o: Options) -> P
     """
     epub = epub or find_epub(audio)
     work = prepare_work(epub, o)
+    logger.info(f"converting {audio.name} with {epub.name} (work folder {work})")
     # Full DEBUG trail (including per-slice status) goes to a log file in the work dir.
     file_sink = logger.add(work / "pipeline.log", level="DEBUG", rotation="5 MB", retention=3)
     try:
@@ -130,6 +131,7 @@ def plan_book(audio: Path, epub: Path | None, o: Options) -> list[Segment]:
     """
     epub = epub or find_epub(audio)
     work = prepare_work(epub, o)
+    logger.info(f"planning chapters for {audio.name} with {epub.name} (no encoding)")
     file_sink = logger.add(work / "pipeline.log", level="DEBUG", rotation="5 MB", retention=3)
     try:
         icloud.ensure_local(audio)

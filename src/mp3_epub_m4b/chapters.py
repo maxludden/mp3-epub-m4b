@@ -10,6 +10,8 @@ from __future__ import annotations
 import bisect
 from collections.abc import Sequence
 
+from loguru import logger
+
 from mp3_epub_m4b.epub_extract import Chapter, EpubMeta
 from mp3_epub_m4b.state import Segment
 
@@ -63,6 +65,7 @@ class SilenceIndex:
         """
         clip_start = after + 3.0
         if clip_start >= total_dur:
+            logger.debug(f"no gap after {after:.1f}s: reached the end of the audio")
             return None, "eof", 0
         clip_end = min(clip_start + max_span, total_dur)
         skipped = 0
@@ -76,9 +79,16 @@ class SilenceIndex:
                 mid = (s + e_clamped) / 2
                 if mid - after < min_offset:
                     skipped += 1
+                    logger.trace(f"gap at {mid:.1f}s is too close to {after:.1f}s; skipping")
                 else:
-                    return mid, ("high" if self.has_companion(k, e_clamped) else "low"), skipped
+                    confidence = "high" if self.has_companion(k, e_clamped) else "low"
+                    logger.debug(
+                        f"gap at {mid:.1f}s after {after:.1f}s ({confidence} confidence, "
+                        f"{skipped} skipped)"
+                    )
+                    return mid, confidence, skipped
             k += 1
+        logger.debug(f"no gap found after {after:.1f}s ({skipped} too early)")
         return None, "fallback", skipped
 
     def has_companion(self, k: int, gap_end: float) -> bool:
@@ -154,6 +164,10 @@ def build_segments(
         )
     if outro_start and (total_dur - outro_start) > 2.0:
         segments.append(make_segment(len(segments), outro_title, outro_start, total_dur))
+    logger.debug(
+        f"built {len(segments)} segments from {len(chapters)} chapters "
+        f"({len(low_confidence)} low-confidence, {len(fallback)} fallback)"
+    )
     return segments
 
 
@@ -209,6 +223,7 @@ def build_ffmetadata(meta: EpubMeta, segments: Sequence[Segment]) -> str:
     if meta.get("series"):
         lines.append(f"show={ffmeta_escape(meta['series'])}")
         lines.append(f"episode_id={ffmeta_escape(meta['series_index'])}")
+    logger.debug(f"writing ffmetadata for {meta['title']!r}: {len(segments)} chapters")
     for s in segments:
         lines += [
             "[CHAPTER]",

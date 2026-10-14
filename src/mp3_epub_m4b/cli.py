@@ -172,6 +172,7 @@ def convert(
     except FileNotFoundError as e:
         raise typer.BadParameter(str(e)) from e
     out_dir = out or audio.parent / "m4b"
+    logger.debug(f"convert {audio} + {epub} -> {out_dir} (dry run: {dry_run})")
     if not dry_run:
         for label, free_gb in low_space(work_dir, out_dir):
             logger.warning(f"only {free_gb:.0f}GB free on the {label} volume")
@@ -331,6 +332,7 @@ def stalign(
     passed straight through to it.
     """
     setup_logging()
+    logger.debug(f"stalign {audio} + {epub} (granularity {granularity.value}, language {language})")
     opts = AlignOptions(
         granularity=granularity.value,
         language=language,

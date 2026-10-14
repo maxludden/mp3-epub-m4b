@@ -70,7 +70,9 @@ def ffprobe_duration(path: Path) -> float:
             str(path),
         ]
     )
-    return float(out.stdout.strip())
+    duration = float(out.stdout.strip())
+    logger.debug(f"{path.name}: duration {duration:.1f}s")
+    return duration
 
 
 def scan_silences(
@@ -181,8 +183,10 @@ def probe_summary(path: Path) -> OutputSummary:
     )
     data = json.loads(out.stdout)
     fmt = data["format"]
-    return OutputSummary(
+    summary = OutputSummary(
         chapters=len(data.get("chapters", [])),
         duration=float(fmt["duration"]),
         streams=int(fmt["nb_streams"]),
     )
+    logger.debug(f"probed {path.name}: {summary}")
+    return summary

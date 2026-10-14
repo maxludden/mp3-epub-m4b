@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from loguru import logger
 from rich.table import Table
 
 from mp3_epub_m4b.chapters import deviating_segments
@@ -118,7 +119,11 @@ def verify_output(
     Raises:
         FFmpegError: If ffprobe fails on the output.
     """
+    logger.debug(f"verifying {output.name} (expecting {expected_chapters} chapters)")
     probed = probe_summary(output)
-    return Verification(
+    result = Verification(
         probed.chapters, probed.duration, source_duration, probed.streams, expected_chapters
     )
+    if result.problems:
+        logger.debug(f"{output.name}: {len(result.problems)} verification problem(s)")
+    return result

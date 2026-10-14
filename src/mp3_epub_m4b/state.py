@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
+from loguru import logger
+
 from mp3_epub_m4b.epub_extract import EpubResult
 
 STAGES = ("extract", "scan", "align", "assemble", "deliver", "readaloud")
@@ -74,6 +76,7 @@ def check_fingerprint(path: Path, saved: dict[str, Any], current: dict[str, Any]
     """
     changed = sorted(k for k in current if saved.get(k) != current[k])
     if changed:
+        logger.error(f"{path.name}: checkpoint does not match this run ({', '.join(changed)})")
         raise StateMismatchError(
             f"{path} was made for different input/options ({', '.join(changed)}). "
             "Re-run with the original settings, or start over "
@@ -89,6 +92,7 @@ def read_state(path: Path) -> PipelineState:
         ValueError: If it isn't valid JSON.
     """
     state: PipelineState = json.loads(path.read_text())
+    logger.debug(f"resumed checkpoint {path} at stage {state.get('stage')!r}")
     return state
 
 
@@ -97,3 +101,4 @@ def write_state(path: Path, state: PipelineState) -> None:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
     tmp.replace(path)
+    logger.trace(f"checkpoint saved: stage {state.get('stage')!r}")

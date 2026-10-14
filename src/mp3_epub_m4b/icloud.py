@@ -47,9 +47,11 @@ def ensure_local(path: Path, timeout: float = DOWNLOAD_TIMEOUT) -> None:
         TimeoutError: If the file is still not local after ``timeout`` seconds.
     """
     if is_local(path):
+        logger.debug(f"{path.name} is already local")
         return
     brctl = _brctl()
     if brctl is None:
+        logger.debug(f"{path.name} looks evicted, but brctl is unavailable; assuming it is usable")
         return
     logger.info(f"{path.name} is evicted from local disk; downloading from iCloud...")
     subprocess.run([brctl, "download", str(path)], capture_output=True)
@@ -64,6 +66,9 @@ def evict(path: Path) -> bool:
     """Evict ``path`` from local disk (it stays in iCloud). Returns whether it was evicted."""
     brctl = _brctl()
     if brctl is None or not in_icloud_drive(path):
+        logger.debug(f"not evicting {path.name}: not in iCloud Drive or brctl is unavailable")
         return False
     proc = subprocess.run([brctl, "evict", str(path)], capture_output=True)
+    if proc.returncode != 0:
+        logger.warning(f"brctl could not evict {path.name} (exit {proc.returncode})")
     return proc.returncode == 0
