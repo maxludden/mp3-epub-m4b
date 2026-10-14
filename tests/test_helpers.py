@@ -72,3 +72,18 @@ def test_pair_files_patterns(tmp_path) -> None:
     assert sorted(audio) == [1, 2, 3] and sorted(epubs) == [1, 2, 9]
     audio, epubs = pair_files(tmp_path, r"Vol\w* (\d+)", r"y_(\d+)$")
     assert sorted(epubs) == [9]
+
+
+def test_pair_files_default_patterns_broaden(tmp_path) -> None:
+    for name in [
+        "Vol. 1.mp3",
+        "Vol2.m4a",
+        "3 - Third Book.mp3",
+        "a_01.epub",
+        "b_2.epub",
+        "3 - Third Book.epub",
+        "Series 9 - Sequel.epub",  # a number mid-title is not a volume number
+    ]:
+        (tmp_path / name).write_text("")
+    audio, epubs = pair_files(tmp_path)
+    assert sorted(audio) == [1, 2, 3] and sorted(epubs) == [1, 2, 3]

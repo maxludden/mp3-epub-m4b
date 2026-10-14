@@ -1,7 +1,8 @@
 """Typer CLI.
 
     mp3-epub-m4b convert "Volume 1.mp3" book_01.epub -o ./m4b
-        mp3-epub-m4b batch "/path/to/series folder"
+    mp3-epub-m4b convert book.mp3             # finds book.epub beside it
+    mp3-epub-m4b batch "/path/to/series folder"
     mp3-epub-m4b stalign book.m4b book.epub
 
 The commands only parse options and pick files; :mod:`mp3_epub_m4b.converter`
@@ -51,7 +52,7 @@ from mp3_epub_m4b.options import (
     Verify,
     WorkDir,
 )
-from mp3_epub_m4b.pairing import pair_files
+from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
 from mp3_epub_m4b.report import chapter_table
 
 app = typer.Typer(
@@ -118,7 +119,10 @@ def _require_tools() -> None:
 @app.command()
 def convert(
     audio: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
-    epub: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    epub: Annotated[
+        Path | None,
+        typer.Argument(exists=True, dir_okay=False, help="Default: the .epub named like AUDIO."),
+    ] = None,
     out: OutDir = None,
     work_dir: WorkDir = DEFAULT_WORK,
     min_gap: MinGap = 3.5,
@@ -138,6 +142,8 @@ def convert(
     dry_run: DryRun = False,
 ) -> None:
     """Convert one AUDIO file with its EPUB, then build a readaloud EPUB from the M4B.
+
+    Without EPUB, the .epub with the same name as the AUDIO file is used.
 
     With --dry-run, only place the chapters and print the chapter table.
     """
@@ -160,6 +166,10 @@ def convert(
         evict=evict,
         verify=verify,
     )
+    try:
+        epub = epub or find_epub(audio)
+    except FileNotFoundError as e:
+        raise typer.BadParameter(str(e)) from e
     out_dir = out or audio.parent / "m4b"
     if not dry_run:
         for label, free_gb in low_space(work_dir, out_dir):
@@ -185,7 +195,10 @@ def _process_book(
 
 @app.command()
 def batch(
-    folder: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    folder: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, help="Folder to scan (default: current)."),
+    ] = Path("."),
     out: OutDir = None,
     work_dir: WorkDir = DEFAULT_WORK,
     min_gap: MinGap = 3.5,
@@ -206,7 +219,11 @@ def batch(
     evict: Evict = False,
     dry_run: DryRun = False,
 ) -> None:
-    """Convert every numbered audio + EPUB pair in FOLDER (default: 'Volume N.mp3' + '*_NN.epub')."""
+    """Convert every audio + EPUB pair in FOLDER (default: the current directory).
+
+    Pairs are numbered ('Volume N.mp3' + '*_NN.epub' by default) or identically
+    named ('Book.mp3' + 'Book.epub').
+    """
     setup_logging()
     _require_tools()
     opts = _build_options(
@@ -235,6 +252,8 @@ def batch(
     for n in sorted(epubs.keys() - audio.keys()):
         logger.info(f"note: {epubs[n].name} has no matching audio")
     jobs = [(f"Book {n}", audio[n], epubs[n]) for n in sorted(audio.keys() & epubs.keys())]
+    paired = {a for _, a, _ in jobs}, {e for _, _, e in jobs}
+    jobs += [(stem, a, e) for stem, a, e in pair_by_name(folder, *paired)]
     if not jobs:
         logger.error(f"no convertible pairs found in {folder}")
         raise typer.Exit(1)

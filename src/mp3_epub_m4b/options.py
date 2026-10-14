@@ -21,7 +21,7 @@ DEFAULT_WORK = Path.home() / ".mp3-epub-m4b-work"
 MIN_FREE_GB = 8
 AUDIO_SUFFIXES = {".mp3", ".m4a"}
 DEFAULT_AUDIO_PATTERN = r"Vol\.?u?m?e?\s?(\d+)|(\d+) - .*"
-DEFAULT_EPUB_PATTERN = r"_(\d+)$"
+DEFAULT_EPUB_PATTERN = r"_(\d+)$|^(\d+) - "
 OUTRO_SEARCH = 1800.0  # how far (s) past the last chapter's start to look for end credits
 
 

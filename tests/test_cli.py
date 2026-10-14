@@ -11,7 +11,7 @@ from mp3_epub_m4b import converter
 from mp3_epub_m4b.cli import app
 from mp3_epub_m4b.converter import convert_book, stage_progress
 from mp3_epub_m4b.options import Options
-from mp3_epub_m4b.pairing import pair_files
+from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
 from mp3_epub_m4b.run import work_name
 from mp3_epub_m4b.state import PipelineState
 
@@ -152,3 +152,22 @@ def test_work_dir_honours_environment(monkeypatch: pytest.MonkeyPatch, tmp_path:
     params = typer.main.get_command(app).commands["convert"].params  # type: ignore[attr-defined]
     work = next(p for p in params if p.name == "work_dir")
     assert work.envvar == "MP3_EPUB_M4B_WORK"
+
+
+def test_pair_by_name_matches_identical_stems(tmp_path: Path) -> None:
+    for name in ["Dune.mp3", "dune.EPUB", "Emma.m4a", "Emma.epub", "Solo.mp3", "Volume 1.mp3"]:
+        (tmp_path / name).write_text("")
+    pairs = pair_by_name(tmp_path, skip_audio={tmp_path / "Volume 1.mp3"})
+    assert [(s, a.name, e.name) for s, a, e in pairs] == [
+        ("Dune", "Dune.mp3", "dune.EPUB"),
+        ("Emma", "Emma.m4a", "Emma.epub"),
+    ]
+
+
+def test_find_epub_matches_stem(tmp_path: Path) -> None:
+    audio = tmp_path / "Dune.mp3"
+    for name in ["Dune.mp3", "Dune II.epub", "Dune.EPUB"]:
+        (tmp_path / name).write_text("")
+    assert find_epub(audio).name == "Dune.EPUB"
+    with pytest.raises(FileNotFoundError):
+        find_epub(tmp_path / "Emma.mp3")

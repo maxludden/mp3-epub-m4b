@@ -81,6 +81,9 @@ By default it pairs `Volume N.mp3` (or `.m4a`) with `..._N.epub` (e.g. `Volume 3
 uv run mp3-epub-m4b batch ./series --audio-pattern 'Book (\d+)' --epub-pattern '_(\d+)$'
 ```
 
+With no folder it scans the current directory. Files that aren't numbered are also
+paired when they share a name: `Some Book.mp3` (or `.m4a`) + `Some Book.epub`.
+
 Unmatched files are reported and skipped, and the batch stops if free disk space
 drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
 

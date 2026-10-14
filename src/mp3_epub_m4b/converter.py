@@ -26,6 +26,7 @@ from mp3_epub_m4b import icloud
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError
 from mp3_epub_m4b.log import console
 from mp3_epub_m4b.options import MIN_FREE_GB, OUTRO_SEARCH, Options
+from mp3_epub_m4b.pairing import find_epub
 from mp3_epub_m4b.report import verify_output
 from mp3_epub_m4b.run import Pipeline, work_name
 from mp3_epub_m4b.state import STAGES, PipelineState, Segment
@@ -76,7 +77,7 @@ def prepare_work(epub: Path, o: Options) -> Path:
     return work
 
 
-def convert_book(audio: Path, epub: Path, out_dir: Path, o: Options) -> Path:
+def convert_book(audio: Path, epub: Path | None, out_dir: Path, o: Options) -> Path:
     """Run the pipeline to completion, rendering per-stage progress bars.
 
     Sources evicted from iCloud are downloaded first. Afterwards the M4B is
@@ -84,7 +85,7 @@ def convert_book(audio: Path, epub: Path, out_dir: Path, o: Options) -> Path:
 
     Args:
         audio: Source audio file.
-        epub: Companion EPUB.
+        epub: Companion EPUB, or ``None`` to use the identically named one beside ``audio``.
         out_dir: Directory for the finished ``.m4b``.
         o: Shared conversion options.
 
@@ -94,8 +95,10 @@ def convert_book(audio: Path, epub: Path, out_dir: Path, o: Options) -> Path:
     Raises:
         StateMismatchError: If saved progress belongs to different files/options.
         FileExistsError: If the output exists and ``o.overwrite`` is false.
+        FileNotFoundError: If ``epub`` is ``None`` and no identically named EPUB exists.
         RuntimeError: If the audio and EPUB don't line up (or ffmpeg fails).
     """
+    epub = epub or find_epub(audio)
     work = prepare_work(epub, o)
     # Full DEBUG trail (including per-slice status) goes to a log file in the work dir.
     file_sink = logger.add(work / "pipeline.log", level="DEBUG", rotation="5 MB", retention=3)
@@ -115,15 +118,17 @@ def convert_book(audio: Path, epub: Path, out_dir: Path, o: Options) -> Path:
     return Path(final)
 
 
-def plan_book(audio: Path, epub: Path, o: Options) -> list[Segment]:
+def plan_book(audio: Path, epub: Path | None, o: Options) -> list[Segment]:
     """Place the chapters (extract, scan, align) without encoding anything.
 
     Progress is checkpointed like a real run, so converting afterwards reuses
-    the scan and the chapter placement.
+    the scan and the chapter placement. ``epub=None`` finds the identically
+    named EPUB beside ``audio``.
 
     Returns:
         The planned chapter segments.
     """
+    epub = epub or find_epub(audio)
     work = prepare_work(epub, o)
     file_sink = logger.add(work / "pipeline.log", level="DEBUG", rotation="5 MB", retention=3)
     try:

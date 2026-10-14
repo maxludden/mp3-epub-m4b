@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Optional convenience wrapper around `mp3-epub-m4b convert`; the CLI does all the work.
 #
-# Usage: convert.sh <audio-file> <epub-file> [mp3-epub-m4b convert options...]
+# Usage: convert.sh <audio-file> [epub-file] [mp3-epub-m4b convert options...]
 #   e.g. convert.sh a.mp3 a.epub -o ./out --no-readaloud --evict
 #
 # Adds --detect-intro and --detect-outro (split opening/end credits into their own
