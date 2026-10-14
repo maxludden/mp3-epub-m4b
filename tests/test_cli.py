@@ -171,3 +171,38 @@ def test_find_epub_matches_stem(tmp_path: Path) -> None:
     assert find_epub(audio).name == "Dune.EPUB"
     with pytest.raises(FileNotFoundError):
         find_epub(tmp_path / "Emma.mp3")
+
+
+def _batch_folder(tmp_path: Path) -> Path:
+    """A folder with one name-paired book (placeholder files, never converted)."""
+    folder = tmp_path / "books"
+    folder.mkdir()
+    (folder / "Dune.mp3").write_text("")
+    (folder / "Dune.epub").write_text("")
+    return folder
+
+
+@pytest.mark.parametrize("answer, converts", [("n\n", False), ("y\n", True)])
+def test_batch_lists_pairs_and_asks_to_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str, converts: bool
+) -> None:
+    converted: list[Path] = []
+    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda: None)
+    monkeypatch.setattr(
+        "mp3_epub_m4b.cli._process_book", lambda audio, *_a: converted.append(audio)
+    )
+    args = ["batch", str(_batch_folder(tmp_path)), "--work-dir", str(tmp_path / "w")]
+    result = CliRunner().invoke(app, args, input=answer)
+    assert "Dune.mp3" in result.output and "Convert these 1 book(s)?" in result.output
+    assert bool(converted) is converts
+
+
+def test_batch_yes_skips_the_question(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    converted: list[Path] = []
+    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda: None)
+    monkeypatch.setattr(
+        "mp3_epub_m4b.cli._process_book", lambda audio, *_a: converted.append(audio)
+    )
+    args = ["batch", str(_batch_folder(tmp_path)), "--work-dir", str(tmp_path / "w"), "-y"]
+    result = CliRunner().invoke(app, args)
+    assert "Convert these" not in result.output and len(converted) == 1

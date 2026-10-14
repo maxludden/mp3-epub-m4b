@@ -21,6 +21,17 @@ def fmt_time(seconds: float) -> str:
     return f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
+def pairs_table(jobs: Sequence[tuple[str, Path, Path]]) -> Table:
+    """Build a table of the ``(label, audio, epub)`` pairs a batch is about to convert."""
+    table = Table(title="Pairs", title_justify="left")
+    table.add_column("Book")
+    table.add_column("Audio")
+    table.add_column("EPUB")
+    for label, audio, epub in jobs:
+        table.add_row(label, audio.name, epub.name)
+    return table
+
+
 def chapter_table(segments: Sequence[Segment]) -> Table:
     """Build a table of the planned chapters.
 

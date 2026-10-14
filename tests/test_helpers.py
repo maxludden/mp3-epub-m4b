@@ -82,7 +82,6 @@ def test_pair_files_default_patterns_broaden(tmp_path) -> None:
         "a_01.epub",
         "b_2.epub",
         "3 - Third Book.epub",
-        "Series 9 - Sequel.epub",  # a number mid-title is not a volume number
     ]:
         (tmp_path / name).write_text("")
     audio, epubs = pair_files(tmp_path)

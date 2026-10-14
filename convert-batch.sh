@@ -6,7 +6,7 @@
 #
 # Pairs "Volume N.mp3|m4a" with "*_N.epub" by default; use --audio-pattern and
 # --epub-pattern for other naming. Adds --detect-intro and --detect-outro.
-# Run `mp3-epub-m4b batch --help` for all options.
+# Add --yes to skip the pairs confirmation. Run `mp3-epub-m4b batch --help` for all options.
 set -eu
 KIT_DIR="${0:A:h}"
 export UV_PROJECT_ENVIRONMENT="${MP3_EPUB_M4B_VENV:-$HOME/.mp3-epub-m4b-venv}"

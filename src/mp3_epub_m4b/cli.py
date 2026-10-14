@@ -51,9 +51,10 @@ from mp3_epub_m4b.options import (
     SliceSeconds,
     Verify,
     WorkDir,
+    Yes,
 )
 from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
-from mp3_epub_m4b.report import chapter_table
+from mp3_epub_m4b.report import chapter_table, pairs_table
 
 app = typer.Typer(
     help="Convert audiobooks (mp3/m4a) plus EPUBs into chaptered M4B files.",
@@ -218,11 +219,13 @@ def batch(
     verify: Verify = True,
     evict: Evict = False,
     dry_run: DryRun = False,
+    yes: Yes = False,
 ) -> None:
     """Convert every audio + EPUB pair in FOLDER (default: the current directory).
 
     Pairs are numbered ('Volume N.mp3' + '*_NN.epub' by default) or identically
-    named ('Book.mp3' + 'Book.epub').
+    named ('Book.mp3' + 'Book.epub'). The pairs are shown for confirmation first
+    (skip with --yes).
     """
     setup_logging()
     _require_tools()
@@ -257,6 +260,11 @@ def batch(
     if not jobs:
         logger.error(f"no convertible pairs found in {folder}")
         raise typer.Exit(1)
+    console.print(pairs_table(jobs))
+    if not (yes or dry_run) and not typer.confirm(
+        f"Convert these {len(jobs)} book(s)?", default=True
+    ):
+        raise typer.Exit(0)
     logger.info(f"Converting {len(jobs)} book(s): {', '.join(label for label, _, _ in jobs)}")
 
     failed = False
