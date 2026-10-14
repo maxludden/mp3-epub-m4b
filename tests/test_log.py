@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 
 from loguru import logger
 from rich.console import Console
@@ -98,4 +99,75 @@ def test_highlighted_log_lines_survive_no_color(monkeypatch) -> None:
     finally:
         logger.remove()
         logger.disable("mp3_epub_m4b")
-    assert buf.getvalue().strip() == "chapter 5 heard at 0:01:02 in '/tmp/a b.mp3'"
+    line = buf.getvalue().strip()
+    assert re.fullmatch(r"\d\d:\d\d:\d\d ℹ chapter 5 heard at 0:01:02 in '/tmp/a b.mp3'", line)
+
+
+def _capture(monkeypatch, **kwargs) -> io.StringIO:
+    """Route the log to a buffer (plain, 60 wide) and set logging up with ``kwargs``."""
+    buf = io.StringIO()
+    monkeypatch.setattr(log_mod, "console", Console(file=buf, force_terminal=False, width=60))
+    log_mod.setup_logging("DEBUG", **kwargs)
+    return buf
+
+
+def _teardown() -> None:
+    logger.remove()
+    logger.disable("mp3_epub_m4b")
+
+
+def test_each_level_gets_its_icon(monkeypatch) -> None:
+    buf = _capture(monkeypatch, timestamps=False)
+    try:
+        logger.info("a")
+        logger.success("b")
+        logger.warning("c")
+        logger.error("d")
+    finally:
+        _teardown()
+    lines = [ln.rstrip() for ln in buf.getvalue().splitlines()]
+    assert lines == ["ℹ a", "✔ b", "⚠ warning: c", "✖ error: d"]
+
+
+def test_timestamps_can_be_switched_off_by_environment(monkeypatch) -> None:
+    monkeypatch.setenv("MP3_EPUB_M4B_LOG_TIME", "off")
+    buf = _capture(monkeypatch)
+    try:
+        logger.info("quiet clock")
+    finally:
+        _teardown()
+    assert buf.getvalue().strip() == "ℹ quiet clock"
+
+
+def test_wrapped_messages_keep_a_hanging_indent(monkeypatch) -> None:
+    buf = _capture(monkeypatch, timestamps=False)
+    try:
+        logger.info("word " * 30)
+    finally:
+        _teardown()
+    first, *rest = buf.getvalue().splitlines()
+    assert first.startswith("ℹ word")
+    assert rest and all(ln.startswith("  word") for ln in rest if ln.strip())
+
+
+def test_logged_exceptions_print_a_rich_traceback(monkeypatch) -> None:
+    buf = _capture(monkeypatch, timestamps=False)
+    try:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logger.exception("it broke")
+    finally:
+        _teardown()
+    out = buf.getvalue()
+    assert "it broke" in out and "ValueError" in out and "boom" in out
+
+
+def test_result_panel_frames_rows_and_marks_outcome() -> None:
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=80)
+    console.print(log_mod.result_panel("Done", [("output", "/tmp/x.m4b"), ("size", "12 MB")]))
+    console.print(log_mod.result_panel("Failed", [("error", "no space")], ok=False))
+    out = buf.getvalue()
+    assert "✔ Done" in out and "/tmp/x.m4b" in out and "12 MB" in out
+    assert "✖ Failed" in out and "no space" in out

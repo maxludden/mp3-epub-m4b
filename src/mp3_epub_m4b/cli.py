@@ -25,7 +25,7 @@ from rich.live import Live
 
 from mp3_epub_m4b.align import AlignError, AlignOptions, align_book
 from mp3_epub_m4b.converter import convert_book, low_space, plan_book
-from mp3_epub_m4b.log import console, setup_logging
+from mp3_epub_m4b.log import console, result_panel, setup_logging
 from mp3_epub_m4b.options import (
     DEFAULT_AUDIO_PATTERN,
     DEFAULT_EPUB_PATTERN,
@@ -196,9 +196,16 @@ def convert(
         final = _process_book(audio, epub, out_dir, opts, dry_run)
     except (RuntimeError, ValueError, OSError) as e:
         logger.error(f"Failed: {e}")
+        console.print(result_panel("Failed", [("book", audio.name), ("error", str(e))], ok=False))
         raise typer.Exit(1) from e
     if final is not None:
-        logger.success(f"Done: {final}")
+        console.print(result_panel("Done", _book_rows(audio, final)))
+
+
+def _book_rows(audio: Path, final: Path) -> list[tuple[str, str]]:
+    """Summary rows for a finished conversion: source, output and output size."""
+    size = f"{final.stat().st_size / 1e6:.0f} MB" if final.exists() else "unknown size"
+    return [("source", audio.name), ("output", str(final)), ("size", size)]
 
 
 def _process_book(
@@ -287,6 +294,7 @@ def batch(
     logger.info(f"Converting {len(jobs)} book(s): {', '.join(label for label, _, _ in jobs)}")
 
     failed = False
+    outcomes: list[tuple[str, str]] = []
     for label, book_audio, book_epub in jobs:
         out_dir = out or book_audio.parent / "m4b"
         if not dry_run and (low := low_space(work_dir, out_dir)):
@@ -301,9 +309,13 @@ def batch(
             final = _process_book(book_audio, book_epub, out_dir, opts, dry_run)
             if final is not None:
                 logger.success(f"{label} complete: {final}")
+                outcomes.append((f"✔ {label}", str(final)))
         except Exception as e:  # keep going with the next book
             logger.error(f"{label} failed: {e}")
+            outcomes.append((f"✖ {label}", f"failed: {e}"))
             failed = True
+    if outcomes:
+        console.print(result_panel("Batch finished", outcomes, ok=not failed))
     raise typer.Exit(1 if failed else 0)
 
 
@@ -365,8 +377,9 @@ def stalign(
         final = align_book(audio, epub, output, opts)
     except AlignError as e:
         logger.error(str(e))
+        console.print(result_panel("Failed", [("book", audio.name), ("error", str(e))], ok=False))
         raise typer.Exit(1) from e
-    logger.success(f"DONE: {final} ({final.stat().st_size / 1e6:.0f} MB)")
+    console.print(result_panel("Done", _book_rows(audio, final)))
 
 
 @app.command()

@@ -27,7 +27,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mp3_epub_m4b.chapters import deviating_segments
 from mp3_epub_m4b.converter import low_space, stage_progress
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError, probe_summary
-from mp3_epub_m4b.log import console
+from mp3_epub_m4b.log import console, setup_logging
 from mp3_epub_m4b.options import (
     AUDIO_SUFFIXES,
     DEFAULT_AUDIO_PATTERN,
@@ -328,9 +328,7 @@ def verify_m4b(path: str) -> dict[str, Any]:
 def main() -> None:
     """Console-script entry point: serve over stdio, logging to stderr only."""
     console.file = sys.stderr  # belt and braces: nothing in-process may print to stdout
-    logger.enable("mp3_epub_m4b")
-    logger.remove()
-    logger.add(sys.stderr, level=os.environ.get("MP3_EPUB_M4B_LOG_LEVEL", "INFO").upper())
+    setup_logging()  # the Rich sink prints to ``console``, which is now stderr
     mcp.run()
 
 
