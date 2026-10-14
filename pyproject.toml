@@ -1,24 +1,30 @@
 [project]
 name = "mp3-epub-m4b"
-version = "0.1.0"
-description = "Convert single-file audiobooks plus EPUBs into chaptered M4B files"
+version = "0.2.0"
+description = "Convert single-file audiobooks (mp3/m4a) plus EPUBs into chaptered M4B files"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Maxwell Ludden", email = "maxludden@gmail.com" }]
-keywords = ["audiobook", "m4b", "epub", "ffmpeg", "chapters"]
+keywords = ["audiobook", "m4b", "mp3", "epub", "ffmpeg", "chapters", "readaloud"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Sound/Audio",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "beautifulsoup4",
+    "beautifulsoup4>=4.12",
     "loguru>=0.7",
-    "lxml",
-    "python-dotenv>=1.2.4",
+    "lxml>=5",
+    "python-dotenv>=1.0",
     "rich>=13",
     "typer>=0.12",
 ]
@@ -59,6 +65,7 @@ warn_redundant_casts = true
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

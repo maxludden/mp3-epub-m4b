@@ -26,11 +26,24 @@ readaloud aligner, and a Python venv at `~/.mp3-epub-m4b-venv` (override with
 `MP3_EPUB_M4B_VENV`). It is safe to re-run. Without Homebrew, install the
 requirements yourself and run `uv sync`.
 
+To run `mp3-epub-m4b` from any directory, install it as a tool:
+
+```shell
+uv tool install .
+```
+
+(or use the `./convert.sh` / `./convert-batch.sh` wrappers, which call `uv run --project`).
+The commands below assume it's on your `PATH`; inside the repo use `uv run mp3-epub-m4b`.
+
 ## Convert one book
 
 ```shell
-uv run mp3-epub-m4b convert "Volume 1.mp3" book_01.epub
+mp3-epub-m4b convert "Volume 1.mp3" book_01.epub
+mp3-epub-m4b convert "Some Book.mp3"      # uses "Some Book.epub" beside it
 ```
+
+The EPUB argument is optional: without it, the `.epub` with the same name as the audio
+file (in the same folder) is used.
 
 The M4B lands in an `m4b/` folder next to the audio (or pass `-o DIR`). Expect roughly
 30–40 minutes for a ~24 h book. The optional `./convert.sh` wrapper does the same and
@@ -42,6 +55,7 @@ instead of after the encode. A real run afterwards reuses the saved scan:
 
 ```text
 $ mp3-epub-m4b convert "Volume 1.mp3" book_01.epub --dry-run
+planning chapters for Volume 1.mp3 with book_01.epub (no encoding)
 extracted: Fish & Chips: A Test by Ann Author, 3 chapters, cover=yes
 scanning Volume 1.mp3 for silences
 scan: found 5 silences
@@ -70,22 +84,28 @@ Fish & Chips A Test.m4b: chapters: 3 | duration: 0:02:28 (source 0:02:28) | stre
 ## Convert a whole series
 
 ```shell
-uv run mp3-epub-m4b batch "/path/to/series folder"
+mp3-epub-m4b batch "/path/to/series folder"
+mp3-epub-m4b batch                          # the current directory
 ```
 
-By default it pairs `Volume N.mp3` (or `.m4a`) with `..._N.epub` (e.g. `Volume 3.mp3` +
-`my_series_03.epub`). For other names use `--audio-pattern` and `--epub-pattern`
-(regexes with one number group):
+Files are paired in two ways, numbered pairs first:
 
-```shell
-uv run mp3-epub-m4b batch ./series --audio-pattern 'Book (\d+)' --epub-pattern '_(\d+)$'
-```
+1. **By number.** By default an audio file named `Volume N`, `Vol. N`, `VolN` or
+   `N - Title` is paired with an EPUB ending in `_N` or containing `N - ` (e.g.
+   `Volume 3.mp3` + `my_series_03.epub`). For other names use `--audio-pattern` (fully
+   matched against the audio file's name) and `--epub-pattern` (searched in the EPUB's
+   name). Each is a regex capturing the number; alternatives may each have their own group:
 
-With no folder it scans the current directory. Files that aren't numbered are also
-paired when they share a name: `Some Book.mp3` (or `.m4a`) + `Some Book.epub`.
+   ```shell
+   mp3-epub-m4b batch ./series --audio-pattern 'Book (\d+)' --epub-pattern '_(\d+)$'
+   ```
 
-Before converting, the pairs are listed and you are asked to confirm; pass `--yes` (`-y`)
-to skip the question. `--dry-run` lists them without asking.
+2. **By name.** Whatever is left is paired when the names match exactly (case-insensitive):
+   `Some Book.mp3` (or `.m4a`) + `Some Book.epub`.
+
+The pairs are then listed and you are asked to confirm. Pass `--yes` (`-y`) to skip the
+question (needed when running unattended); `--dry-run` lists the pairs and the planned
+chapters without asking or encoding.
 
 Unmatched files are reported and skipped, and the batch stops if free disk space
 drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
@@ -116,8 +136,10 @@ drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
   changing them (for example `--min-gap`) stops with a clear message; use `--fresh`.
 - **Where things go.** Scratch work lives in `~/.mp3-epub-m4b-work` (override with
   `--work-dir` or `MP3_EPUB_M4B_WORK`). Each book gets a debug log at
-  `<work folder>/<book>/pipeline.log`; set `MP3_EPUB_M4B_LOG_LEVEL=DEBUG` for debug
-  output on the console.
+  `<work folder>/<book>/pipeline.log`; set `MP3_EPUB_M4B_LOG_LEVEL=DEBUG` (or `TRACE`) for
+  more detail on the console. Logging uses [loguru](https://github.com/Delgan/loguru) and is
+  silent when the package is imported as a library until you call
+  `logger.enable("mp3_epub_m4b")`.
 - The audio is scanned for silences once (cached), chapters are placed in memory, and the
   M4B is encoded in a single pass, so chapter joins are gapless.
 
@@ -160,7 +182,7 @@ settings. Re-run with the original settings, or add `--fresh`.
 - `ffmpeg_tools.py` — ffmpeg/ffprobe helpers (silence scan, probing)
 - `report.py` — chapter table and output verification
 - `icloud.py` — iCloud Drive download/evict (macOS)
-- `stalign.py` — readaloud alignment wrapper; `log.py` — logging setup
+- `align.py` — readaloud alignment wrapper; `log.py` — logging setup
 
 ## Development
 

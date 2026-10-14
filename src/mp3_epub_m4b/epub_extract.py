@@ -214,7 +214,6 @@ def extract_epub(epub_path: Path, work_dir: Path) -> EpubResult:
         chapters = _extract_chapters_via_blocklist(base, manifest, spine)
         logger.debug(f"{len(chapters)} chapters from the spine")
 
-    logger.info(f"{meta['title']!r} by {meta['author']!r}: {len(chapters)} chapters")
     if cover_path is None:
         logger.debug("no cover image found")
     return {
