@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Annotated
@@ -58,11 +59,15 @@ from mp3_epub_m4b.options import (
     WhisperModel,
     WorkDir,
     Yes,
+    options_from_json,
 )
 from mp3_epub_m4b.pairing import find_epub, pair_folder
+from mp3_epub_m4b.questions import NeedsInput
 from mp3_epub_m4b.report import chapter_table, pairs_table
 from mp3_epub_m4b.run import work_name
+from mp3_epub_m4b.state import read_state
 from mp3_epub_m4b.status import BookStatus, build_view, read_all_status, read_status
+from mp3_epub_m4b.transcribe import WhisperError, find_whisper
 
 app = typer.Typer(
     help="Convert audiobooks (mp3/m4a) plus EPUBs into chaptered M4B files.",
@@ -118,15 +123,27 @@ def _build_options(
     )
 
 
-def _require_tools() -> None:
-    """Ensure ``ffmpeg`` and ``ffprobe`` are on ``PATH``.
+EXIT_NEEDS_INPUT = 3  # a book stopped to wait for a person's answer
+
+
+def _require_tools(align_by: AlignMode, whisper_model: Path | None = None) -> None:
+    """Ensure ``ffmpeg`` and ``ffprobe`` are on ``PATH``, and whisper.cpp when the mode needs it.
 
     Raises:
-        typer.BadParameter: If either tool is missing.
+        typer.BadParameter: If a required tool is missing.
     """
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
             raise typer.BadParameter(f"{tool} not found on PATH (brew install ffmpeg)")
+    if align_by in (AlignMode.anchored, AlignMode.transcribe):
+        try:
+            find_whisper(whisper_model)
+        except WhisperError as e:
+            raise typer.BadParameter(f"{e}; or pass --align-by silence") from e
+
+
+def _resolve_hint(audio: Path) -> str:
+    return f'waiting for input; answer it with: mp3-epub-m4b resolve "{audio}"'
 
 
 @app.command()
@@ -151,7 +168,7 @@ def convert(
     align_device: AlignDevice = None,
     align_language: AlignLanguage = "en-US",
     verify: Verify = True,
-    align_by: AlignBy = AlignMode.auto,
+    align_by: AlignBy = AlignMode.anchored,
     whisper_model: WhisperModel = None,
     evict: Evict = False,
     dry_run: DryRun = False,
@@ -161,9 +178,14 @@ def convert(
     Without EPUB, the .epub with the same name as the AUDIO file is used.
 
     With --dry-run, only place the chapters and print the chapter table.
+
+    When the start or end of the book can't be confirmed, or a chapter's length
+    doesn't fit its text, you are asked in the terminal. Without a terminal the
+    question is saved and the command exits with status 3; answer it later with
+    `mp3-epub-m4b resolve AUDIO`.
     """
     setup_logging()
-    _require_tools()
+    _require_tools(align_by, whisper_model)
     opts = _build_options(
         work_dir=work_dir,
         min_gap=min_gap,
@@ -192,8 +214,12 @@ def convert(
     if not dry_run:
         for label, free_gb in low_space(work_dir, out_dir):
             logger.warning(f"only {free_gb:.0f}GB free on the {label} volume")
+    opts.interactive = sys.stdin.isatty()
     try:
         final = _process_book(audio, epub, out_dir, opts, dry_run)
+    except NeedsInput:
+        logger.warning(_resolve_hint(audio))
+        raise typer.Exit(EXIT_NEEDS_INPUT) from None
     except (RuntimeError, ValueError, OSError) as e:
         logger.error(f"Failed: {e}")
         raise typer.Exit(1) from e
@@ -234,7 +260,7 @@ def batch(
     align_device: AlignDevice = None,
     align_language: AlignLanguage = "en-US",
     verify: Verify = True,
-    align_by: AlignBy = AlignMode.auto,
+    align_by: AlignBy = AlignMode.anchored,
     whisper_model: WhisperModel = None,
     evict: Evict = False,
     dry_run: DryRun = False,
@@ -245,9 +271,13 @@ def batch(
     Pairs are numbered ('Volume N.mp3' + '*_NN.epub' by default) or identically
     named ('Book.mp3' + 'Book.epub'). The pairs are shown for confirmation first
     (skip with --yes).
+
+    Batch never stops to ask: a book that needs a decision is left waiting
+    (nothing encoded) and the next book starts. Answer later with
+    `mp3-epub-m4b resolve AUDIO`.
     """
     setup_logging()
-    _require_tools()
+    _require_tools(align_by, whisper_model)
     opts = _build_options(
         work_dir=work_dir,
         min_gap=min_gap,
@@ -287,6 +317,7 @@ def batch(
     logger.info(f"Converting {len(jobs)} book(s): {', '.join(label for label, _, _ in jobs)}")
 
     failed = False
+    waiting: list[Path] = []
     for label, book_audio, book_epub in jobs:
         out_dir = out or book_audio.parent / "m4b"
         if not dry_run and (low := low_space(work_dir, out_dir)):
@@ -301,10 +332,18 @@ def batch(
             final = _process_book(book_audio, book_epub, out_dir, opts, dry_run)
             if final is not None:
                 logger.success(f"{label} complete: {final}")
+        except NeedsInput:
+            logger.warning(f"{label}: {_resolve_hint(book_audio)}")
+            waiting.append(book_audio)
         except Exception as e:  # keep going with the next book
             logger.error(f"{label} failed: {e}")
             failed = True
-    raise typer.Exit(1 if failed else 0)
+    if waiting:
+        logger.warning(
+            f"{len(waiting)} book(s) waiting for input: "
+            + ", ".join(f'mp3-epub-m4b resolve "{a}"' for a in waiting)
+        )
+    raise typer.Exit(1 if failed else EXIT_NEEDS_INPUT if waiting else 0)
 
 
 _PASSTHROUGH = {"allow_extra_args": True, "ignore_unknown_options": True}
@@ -415,6 +454,47 @@ def status(
                 live.update(view)
     except KeyboardInterrupt:
         pass
+
+
+@app.command()
+def resolve(
+    book: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, help="The book's audio file or EPUB.")
+    ],
+    work_dir: WorkDir = DEFAULT_WORK,
+) -> None:
+    """Answer the questions a conversion stopped on, then carry on with it.
+
+    Picks up a book left waiting by `batch`, by Claude, or by `convert` without
+    a terminal, with the same settings it was started with.
+    """
+    setup_logging()
+    try:
+        epub = book if book.suffix.lower() == ".epub" else find_epub(book)
+    except FileNotFoundError as e:
+        raise typer.BadParameter(str(e)) from e
+    state_path = work_dir / work_name(epub.stem) / "state.json"
+    try:
+        state = read_state(state_path)
+    except (OSError, ValueError):
+        state = None
+    if state is None or "pending_question" not in state or "job" not in state:
+        logger.error(f"nothing to resolve for {book.name} (no waiting question in {state_path})")
+        raise typer.Exit(1)
+    job = state["job"]
+    opts = options_from_json(job["options"])
+    opts.interactive, opts.fresh = True, False
+    audio = Path(job["audio"])
+    _require_tools(AlignMode(opts.align_by), opts.whisper_model)
+    try:
+        if job["dry_run"]:
+            console.print(chapter_table(plan_book(audio, epub, opts)))
+            return
+        final = convert_book(audio, epub, Path(job["out_dir"]), opts)
+    except (RuntimeError, ValueError, OSError) as e:
+        logger.error(f"Failed: {e}")
+        raise typer.Exit(1) from e
+    logger.success(f"Done: {final}")
 
 
 def main() -> None:

@@ -415,6 +415,11 @@ class Pipeline:
             self.state["stage"], detail=detail, done=done, total=total, unit=unit, force=force
         )
 
+    def record_job(self, job: dict[str, Any]) -> None:
+        """Save how this run was started, so ``mp3-epub-m4b resolve`` can carry it on."""
+        self.state["job"] = job
+        self._save()
+
     def _save(self) -> None:
         """Atomically write the in-memory state to ``state_path``."""
         write_state(self.state_path, self.state)

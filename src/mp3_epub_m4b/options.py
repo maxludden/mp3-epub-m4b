@@ -7,10 +7,10 @@ so the commands in :mod:`mp3_epub_m4b.cli` only declare what differs.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -65,6 +65,23 @@ class Options:
     align_by: str = "anchored"
     whisper_model: Path | None = None
     interactive: bool = False
+
+
+def options_to_json(o: Options) -> dict[str, Any]:
+    """``o`` as JSON-safe values, for saving with a run so ``resolve`` can carry it on."""
+    d = asdict(o)
+    d["work_dir"] = str(o.work_dir)
+    d["whisper_model"] = str(o.whisper_model) if o.whisper_model else None
+    return d
+
+
+def options_from_json(d: dict[str, Any]) -> Options:
+    """Rebuild :class:`Options` saved by :func:`options_to_json`."""
+    d = dict(d)
+    d["work_dir"] = Path(d["work_dir"])
+    d["whisper_model"] = Path(d["whisper_model"]) if d.get("whisper_model") else None
+    d["readaloud"] = AlignOptions(**d["readaloud"]) if d.get("readaloud") else None
+    return Options(**d)
 
 
 class Granularity(StrEnum):

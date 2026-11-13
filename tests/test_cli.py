@@ -13,7 +13,9 @@ from mp3_epub_m4b.converter import convert_book, stage_progress
 from mp3_epub_m4b.options import Options
 from mp3_epub_m4b.pairing import find_epub, pair_by_name, pair_files
 from mp3_epub_m4b.run import work_name
-from mp3_epub_m4b.state import PipelineState
+from mp3_epub_m4b.state import PipelineState, read_state
+
+from .conftest import make_epub_with_matter
 
 
 def _options(work_dir: Path, *, fresh: bool = False) -> Options:
@@ -187,7 +189,8 @@ def test_batch_lists_pairs_and_asks_to_confirm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str, converts: bool
 ) -> None:
     converted: list[Path] = []
-    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda: None)
+    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda *_a: None)
+    monkeypatch.setattr("mp3_epub_m4b.cli.low_space", lambda *_a: [])
     monkeypatch.setattr(
         "mp3_epub_m4b.cli._process_book", lambda audio, *_a: converted.append(audio)
     )
@@ -199,10 +202,109 @@ def test_batch_lists_pairs_and_asks_to_confirm(
 
 def test_batch_yes_skips_the_question(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     converted: list[Path] = []
-    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda: None)
+    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda *_a: None)
+    monkeypatch.setattr("mp3_epub_m4b.cli.low_space", lambda *_a: [])
     monkeypatch.setattr(
         "mp3_epub_m4b.cli._process_book", lambda audio, *_a: converted.append(audio)
     )
     args = ["batch", str(_batch_folder(tmp_path)), "--work-dir", str(tmp_path / "w"), "-y"]
     result = CliRunner().invoke(app, args)
     assert "Convert these" not in result.output and len(converted) == 1
+
+
+# ------------------------------------------------------------ anchored mode
+
+
+def _anchored_book(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, heard: str = "tone"
+) -> tuple[Path, Path]:
+    """A name-paired book whose audio is faked: whisper hears ``heard`` everywhere."""
+    from .test_anchored_pipeline import patch_audio  # noqa: PLC0415
+
+    folder = tmp_path / "books"
+    folder.mkdir()
+    mp3, epub = folder / "Book.mp3", folder / "Book.epub"
+    mp3.write_bytes(b"x")
+    make_epub_with_matter(epub)
+    patch_audio(monkeypatch, [], lambda _t: heard)
+    monkeypatch.setattr("mp3_epub_m4b.cli._require_tools", lambda *_a: None)
+    monkeypatch.setattr("mp3_epub_m4b.cli.low_space", lambda *_a: [])
+    return mp3, epub
+
+
+def test_convert_without_a_terminal_exits_3_with_the_question_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mp3, epub = _anchored_book(tmp_path, monkeypatch)
+    work = tmp_path / "w"
+    result = CliRunner().invoke(
+        app, ["convert", str(mp3), str(epub), "--work-dir", str(work), "--dry-run"]
+    )
+    assert result.exit_code == 3, result.output
+    assert "resolve" in result.output
+    state = read_state(work / work_name(epub.stem) / "state.json")
+    assert state["pending_question"]["kind"] == "start"
+    assert state["job"]["audio"] == str(mp3) and state["job"]["dry_run"] is True
+
+
+def test_resolve_answers_and_carries_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mp3, epub = _anchored_book(tmp_path, monkeypatch)
+    work = tmp_path / "w"
+    CliRunner().invoke(app, ["convert", str(mp3), str(epub), "--work-dir", str(work), "--dry-run"])
+    answers = iter(["section:2", "section:4"])
+    monkeypatch.setattr("mp3_epub_m4b.prompt.ask", lambda q, **_k: next(answers))
+    result = CliRunner().invoke(app, ["resolve", str(mp3), "--work-dir", str(work)])
+    assert result.exit_code == 0, result.output
+    assert "Fate = Doom" in result.output  # the dry run's chapter table
+    assert "pending_question" not in read_state(work / work_name(epub.stem) / "state.json")
+
+
+def test_resolve_with_nothing_waiting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mp3, _epub = _anchored_book(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["resolve", str(mp3), "--work-dir", str(tmp_path / "w")])
+    assert result.exit_code == 1 and "nothing to resolve" in result.output
+
+
+def test_batch_moves_on_past_a_book_waiting_for_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mp3, _epub = _anchored_book(tmp_path, monkeypatch)
+    result = CliRunner().invoke(
+        app, ["batch", str(mp3.parent), "--work-dir", str(tmp_path / "w"), "-y"]
+    )
+    assert result.exit_code == 3, result.output
+    assert "waiting for input" in result.output and "mp3-epub-m4b resolve" in result.output
+
+
+def test_anchored_is_the_default_and_needs_whisper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mp3_epub_m4b.transcribe import WhisperError  # noqa: PLC0415
+
+    def missing(_model: object = None) -> tuple[str, Path]:
+        raise WhisperError("whisper.cpp not found on PATH (brew install whisper-cpp)")
+
+    monkeypatch.setattr("mp3_epub_m4b.cli.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("mp3_epub_m4b.cli.find_whisper", missing)
+    mp3, epub = tmp_path / "B.mp3", tmp_path / "B.epub"
+    mp3.write_bytes(b"x")
+    epub.write_bytes(b"x")
+    result = CliRunner().invoke(
+        app, ["convert", str(mp3), str(epub), "--work-dir", str(tmp_path / "w")]
+    )
+    assert result.exit_code == 2
+    assert "whisper.cpp not found" in result.output and "--align-by silence" in result.output
+    ok = CliRunner().invoke(
+        app,
+        [
+            "convert",
+            str(mp3),
+            str(epub),
+            "--align-by",
+            "silence",
+            "--dry-run",
+            "--work-dir",
+            str(tmp_path / "w"),
+        ],
+    )
+    assert "whisper" not in ok.output

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 from rich.console import Group
@@ -25,11 +26,12 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from mp3_epub_m4b import icloud
+from mp3_epub_m4b import icloud, prompt
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError
 from mp3_epub_m4b.log import console
-from mp3_epub_m4b.options import MIN_FREE_GB, OUTRO_SEARCH, Options
+from mp3_epub_m4b.options import MIN_FREE_GB, OUTRO_SEARCH, Options, options_to_json
 from mp3_epub_m4b.pairing import find_epub
+from mp3_epub_m4b.questions import NeedsInput
 from mp3_epub_m4b.report import verify_output
 from mp3_epub_m4b.run import Pipeline, work_name
 from mp3_epub_m4b.state import STAGES, PipelineState, Segment
@@ -109,7 +111,8 @@ def convert_book(audio: Path, epub: Path | None, out_dir: Path, o: Options) -> P
     try:
         icloud.ensure_local(audio)
         icloud.ensure_local(epub)
-        state = run_pipeline(audio, epub, out_dir, work, o)
+        job = job_record(audio, epub, out_dir, o, dry_run=False)
+        state = run_pipeline(audio, epub, out_dir, work, o, job=job)
     finally:
         logger.remove(file_sink)
     final = state.get("final_output")
@@ -139,13 +142,27 @@ def plan_book(audio: Path, epub: Path | None, o: Options) -> list[Segment]:
     try:
         icloud.ensure_local(audio)
         icloud.ensure_local(epub)
-        state = run_pipeline(audio, epub, work, work, o, stop_at="assemble")
+        job = job_record(audio, epub, None, o, dry_run=True)
+        state = run_pipeline(audio, epub, work, work, o, stop_at="assemble", job=job)
     finally:
         logger.remove(file_sink)
     segments = state.get("segments")
     if segments is None:
         raise RuntimeError("chapter placement finished without producing segments")
     return segments
+
+
+def job_record(
+    audio: Path, epub: Path, out_dir: Path | None, o: Options, *, dry_run: bool
+) -> dict[str, Any]:
+    """How a run was started, saved in its checkpoint so ``resolve`` can carry it on."""
+    return {
+        "audio": str(audio),
+        "epub": str(epub),
+        "out_dir": str(out_dir) if out_dir else None,
+        "dry_run": dry_run,
+        "options": options_to_json(o),
+    }
 
 
 def report_verification(output: Path, state: PipelineState) -> None:
@@ -169,6 +186,7 @@ def run_pipeline(
     work: Path,
     o: Options,
     stop_at: str | None = None,
+    job: dict[str, Any] | None = None,
 ) -> PipelineState:
     """Drive a :class:`Pipeline` to completion (or until ``stop_at``), rendering progress bars.
 
@@ -179,9 +197,14 @@ def run_pipeline(
         work: The book's work folder.
         o: Shared conversion options.
         stop_at: Stop before running this stage (e.g. ``"assemble"`` for a dry run).
+        job: How the run was started, saved in the checkpoint (see :func:`job_record`).
 
     Returns:
         The final checkpoint.
+
+    Raises:
+        NeedsInput: When anchoring needs a decision and ``o.interactive`` is off
+            (the question is saved in the checkpoint).
     """
     pipeline = Pipeline(
         audio,
@@ -202,6 +225,8 @@ def run_pipeline(
         align_by=o.align_by,
         whisper_model=o.whisper_model,
     )
+    if job is not None:
+        pipeline.record_job(job)
     stages = pipeline.stages[: pipeline.stages.index(stop_at)] if stop_at else pipeline.stages
 
     def finished() -> bool:
@@ -220,7 +245,7 @@ def run_pipeline(
     # what the pipeline is doing right now, on its own line under the bars so a
     # long description never squeezes them
     now_line = Text("", style="#00aaff", no_wrap=True, overflow="ellipsis")
-    with Live(Group(progress, now_line), console=console, refresh_per_second=4):
+    with Live(Group(progress, now_line), console=console, refresh_per_second=4) as live:
         overall = progress.add_task("overall", total=len(stages))
         tasks: dict[str, TaskID] = {}
 
@@ -250,7 +275,18 @@ def run_pipeline(
                     label = "deliver (MB)"
                 tasks[stage] = progress.add_task(label, total=None)
 
-            pipeline.run(o.slice_seconds)
+            try:
+                pipeline.run(o.slice_seconds)
+            except NeedsInput as e:
+                if not o.interactive:
+                    raise
+                live.stop()
+                try:
+                    choice = prompt.ask(e.question)
+                finally:
+                    live.start()
+                pipeline.answer(choice)
+                continue
 
             if pipeline.state["stage"] == stage:
                 done, total = stage_progress(pipeline.state)
