@@ -80,11 +80,11 @@ def patch_audio(
     )
 
 
-def make(book: Book, tmp_path: Path) -> Pipeline:
+def make(book: Book, tmp_path: Path, **kw: object) -> Pipeline:
     mp3, epub = book
     return Pipeline(
         mp3, epub, tmp_path / "out", tmp_path / "work", 3.5, "Opening Credits", "End Credits",
-        1800.0, "64k", align_by="anchored",
+        1800.0, "64k", align_by="anchored", **kw,  # type: ignore[arg-type]
     )  # fmt: skip
 
 
@@ -155,8 +155,18 @@ def test_answers_resume_to_assemble(book, tmp_path, monkeypatch, calls) -> None:
     patch_audio(monkeypatch, calls, lambda _t: TONE)
     p = make(book, tmp_path)
     assert answer_all(p, ["section:2", "section:4"]) == ["start", "end"]
-    assert p.state["align"]["anchored"]["start"] == {"clip": 0, "section": 2, "confirmed": True}
-    assert p.state["align"]["anchored"]["end"] == {"clip": 3, "section": 4, "confirmed": True}
+    assert p.state["align"]["anchored"]["start"] == {
+        "clip": 0,
+        "section": 2,
+        "confirmed": True,
+        "person": True,
+    }
+    assert p.state["align"]["anchored"]["end"] == {
+        "clip": 3,
+        "section": 4,
+        "confirmed": True,
+        "person": True,
+    }
     assert p.state["stage"] == "assemble"
 
 
@@ -208,7 +218,7 @@ def test_chapter_question_choices(book, tmp_path, monkeypatch, calls) -> None:
         run_until_assemble(p)
     q = e.value.question
     assert q["kind"] == "chapter" and q["chapter"] == 1 and q["clip_start"] == 61.8
-    assert [c["id"] for c in q["choices"]] == ["chapter:2", "not-a-boundary"]
+    assert [c["id"] for c in q["choices"]] == ["chapter:2", "not-a-boundary", "accept"]
 
 
 def test_resume_reuses_cached_transcripts(book, tmp_path, monkeypatch, calls) -> None:
@@ -221,3 +231,53 @@ def test_resume_reuses_cached_transcripts(book, tmp_path, monkeypatch, calls) ->
     p2 = make(book, tmp_path)  # a new process resuming from state.json
     run_until_assemble(p2)
     assert len(calls) == len(set(calls))  # nothing transcribed twice
+
+
+# ----------------------------------------------------------- review fixes
+
+
+def test_wrong_end_anchor_is_caught_by_the_last_chapters_length(
+    book, tmp_path, monkeypatch, calls
+) -> None:
+    # chapter 3's opening is misheard, so the end anchors on chapter 2 and chapter 3 would be lost
+    starts = expected_boundaries()
+    heard = narrator(starts[:2])
+    patch_audio(monkeypatch, calls, heard)
+    p = make(book, tmp_path)
+    with pytest.raises(NeedsInput) as e:
+        run_until_assemble(p)
+    assert e.value.question["kind"] == "end"
+
+
+def test_long_intro_before_the_start_anchor_is_asked_about(
+    book, tmp_path, monkeypatch, calls
+) -> None:
+    # chapter 1 is misheard, so the start anchors on chapter 2 at 32 s; with --detect-intro
+    # that would turn all of chapter 1 into "Opening Credits"
+    starts = expected_boundaries()
+    patch_audio(
+        monkeypatch, calls, lambda t: TONE if abs(t - starts[0]) < 3 else narrator(starts)(t)
+    )
+    p = make(book, tmp_path, detect_intro=True, intro_max_len=20.0)
+    with pytest.raises(NeedsInput) as e:
+        run_until_assemble(p)
+    assert e.value.question["kind"] == "start"
+
+
+def test_accepting_a_chapter_keeps_it_flagged_and_moves_on(
+    book, tmp_path, monkeypatch, calls
+) -> None:
+    patch_audio(monkeypatch, calls, narrator(expected_boundaries()), SPARSE)
+    p = make(book, tmp_path)
+    answer_all(p, ["section:2", "section:4", "accept", "accept"])
+    assert p.state["stage"] == "assemble"
+    assert set(p.state["align"]["low_confidence"]) >= {1}
+
+
+def test_a_recording_without_chapter_pauses_says_to_use_transcribe(
+    book, tmp_path, monkeypatch, calls
+) -> None:
+    patch_audio(monkeypatch, calls, narrator(expected_boundaries()), [])
+    p = make(book, tmp_path)
+    with pytest.raises(RuntimeError, match="--align-by transcribe"):
+        run_until_assemble(p)

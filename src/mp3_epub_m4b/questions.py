@@ -22,7 +22,12 @@ TEXT_WORDS = 25  # words of each section's opening shown with a choice
 
 
 class Choice(TypedDict):
-    """One answer: ``id`` is ``section:<i>``, ``chapter:<n>``, ``clip:next``, ``clip:prev`` or ``not-a-boundary``."""
+    """One answer.
+
+    ``id`` is ``section:<i>``, ``chapter:<n>``, ``clip:next``, ``clip:prev``,
+    ``more`` (show the next sections), ``not-a-boundary`` or ``accept`` (keep the
+    chapter as placed).
+    """
 
     id: str
     label: str
@@ -42,15 +47,18 @@ class Question(TypedDict):
     choices: list[Choice]
     suggested: str | None
     chapter: NotRequired[int]
+    offset: NotRequired[int]  # start/end questions: how far into the section list they begin
 
 
 class AnchoredProgress(TypedDict, total=False):
     """Checkpointed progress of anchored alignment."""
 
     heard: dict[str, list[list[Any]]]  # clip index -> [[start, end, text], ...]
-    start: dict[str, Any] | None  # {"clip", "section", "confirmed"}
+    start: dict[str, Any] | None  # {"clip", "section", "confirmed"[, "person"]}
     end: dict[str, Any] | None
     ask_clip: dict[str, int]  # "start"/"end" -> clip the person is being asked about
+    offset: dict[str, int]  # "start"/"end" -> first section shown (paging with "more")
+    accepted: list[int]  # chapters the person chose to keep as placed
     fixed: dict[str, float]  # chapter number -> start the person chose
     rejected: list[float]  # positions the person said are not chapter starts
 
@@ -98,42 +106,69 @@ def _edge_question(
     sections: Sequence[Section],
     suggested: int | None,
     clip_path: Path,
+    *,
+    offset: int,
+    can_move: bool,
 ) -> Question:
     matchable = [s for s in sections if s["word_count"] >= MIN_SECTION_WORDS]
-    shown = matchable[:CHOICES_SHOWN] if kind == "start" else matchable[-CHOICES_SHOWN:]
+    ordered = matchable if kind == "start" else matchable[::-1]
+    page = ordered[offset : offset + CHOICES_SHOWN]
+    shown = sorted(page, key=lambda s: s["index"])
     if suggested is not None and all(s["index"] != suggested for s in shown):
         shown = sorted([*shown, sections[suggested]], key=lambda s: s["index"])
     q = _base(kind, prompt, clip, heard, clip_path)
+    q["offset"] = offset
     q["choices"] = [_section_choice(s) for s in shown]
-    if kind == "start":
+    if offset + CHOICES_SHOWN < len(ordered):
+        where = "later" if kind == "start" else "earlier"
         q["choices"].append(
-            {"id": "clip:next", "label": "None of these", "text": "Play the next clip instead."}
+            {"id": "more", "label": "More sections", "text": f"Show {where} sections."}
         )
-    else:
+    if can_move:
+        step, word = ("clip:next", "next") if kind == "start" else ("clip:prev", "previous")
         q["choices"].append(
-            {"id": "clip:prev", "label": "None of these", "text": "Play the previous clip instead."}
+            {"id": step, "label": "None of these", "text": f"Play the {word} clip instead."}
         )
     q["suggested"] = f"section:{suggested}" if suggested is not None else None
     return q
 
 
 def start_question(
-    clip: Clip, heard: str, sections: Sequence[Section], suggested: int | None, clip_path: Path
+    clip: Clip,
+    heard: str,
+    sections: Sequence[Section],
+    suggested: int | None,
+    clip_path: Path,
+    *,
+    offset: int = 0,
+    last_clip: bool = False,
 ) -> Question:
-    """Ask which section the narrator begins in ``clip`` (the first ``CHOICES_SHOWN`` sections)."""
+    """Ask which section the narrator begins in ``clip`` (``CHOICES_SHOWN`` sections from the front)."""
     prompt = "Where does the book start? Listen to the clip and pick the section the narrator is reading."
-    return _edge_question("start", prompt, clip, heard, sections, suggested, clip_path)
+    return _edge_question(
+        "start", prompt, clip, heard, sections, suggested, clip_path,
+        offset=offset, can_move=not last_clip,
+    )  # fmt: skip
 
 
 def end_question(
-    clip: Clip, heard: str, sections: Sequence[Section], suggested: int | None, clip_path: Path
+    clip: Clip,
+    heard: str,
+    sections: Sequence[Section],
+    suggested: int | None,
+    clip_path: Path,
+    *,
+    offset: int = 0,
 ) -> Question:
-    """Ask which of the last ``CHOICES_SHOWN`` sections the narrator begins in ``clip``."""
+    """Ask which section the narrator begins in ``clip`` (``CHOICES_SHOWN`` sections from the back)."""
     prompt = (
         "Where does the last narrated section start? Listen to the clip and pick the section "
         "the narrator is reading."
     )
-    return _edge_question("end", prompt, clip, heard, sections, suggested, clip_path)
+    return _edge_question(
+        "end", prompt, clip, heard, sections, suggested, clip_path,
+        offset=offset, can_move=clip.index > 0,
+    )  # fmt: skip
 
 
 def chapter_question(
@@ -172,6 +207,13 @@ def chapter_question(
                 "text": "This is a pause inside a chapter.",
             }
         )
+    q["choices"].append(
+        {
+            "id": "accept",
+            "label": "Keep it as it is",
+            "text": "The chapter is placed right; its length is just unusual.",
+        }
+    )
     return q
 
 
@@ -187,12 +229,24 @@ def apply_answer(progress: AnchoredProgress, question: Question, choice_id: str)
     q = question["kind"]
     if q in ("start", "end"):
         if kind == "section":
-            progress[q] = {"clip": question["clip"], "section": int(value), "confirmed": True}
+            progress[q] = {
+                "clip": question["clip"],
+                "section": int(value),
+                "confirmed": True,
+                "person": True,
+            }
+            progress.setdefault("offset", {})[q] = 0
+        elif kind == "more":
+            progress.setdefault("offset", {})[q] = question.get("offset", 0) + CHOICES_SHOWN
+            progress.setdefault("ask_clip", {})[q] = question["clip"]
+            progress[q] = None
         else:
             step = 1 if value == "next" else -1
             progress.setdefault("ask_clip", {})[q] = question["clip"] + step
             progress[q] = None
     elif kind == "chapter":
         progress.setdefault("fixed", {})[value] = question["clip_start"]
+    elif kind == "accept":
+        progress.setdefault("accepted", []).append(question.get("chapter", 0))
     else:  # not-a-boundary
         progress.setdefault("rejected", []).append(question["clip_start"])

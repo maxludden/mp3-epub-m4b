@@ -106,8 +106,10 @@ any chapter is placed, and nothing is encoded until every chapter checks out:
 
 When a check fails, you're asked. You hear the 10-second clip, see what whisper heard and
 the opening lines of the candidate sections, and pick where the narrator is. A flagged
-chapter gets the same treatment at its suspect boundary, with a "no chapter starts here"
-option for a pause inside a chapter. Your answer fixes that boundary and everything after
+chapter gets the same treatment at its suspect boundary, with "no chapter starts here" (a
+pause inside a chapter) and "keep it as it is" options. A first or last chapter whose length
+doesn't fit sends you back to the start or end question, since that anchor is the likely
+culprit. Your answer fixes that boundary and everything after
 it is re-checked.
 
 Without a terminal (a batch run, Claude, a pipe) the question is saved instead, nothing is

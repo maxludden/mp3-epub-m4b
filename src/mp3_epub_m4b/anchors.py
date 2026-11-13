@@ -82,12 +82,17 @@ def _best(heard: Sequence[Word], sections: Sequence[Section]) -> tuple[int, floa
     return max(scored, key=lambda x: x[1]) if scored else None
 
 
+def _matchable(sections: Sequence[Section]) -> list[Section]:
+    return [s for s in sections if s["word_count"] >= MIN_SECTION_WORDS]
+
+
 def find_start(
     heard: Mapping[int, Sequence[Word]], clips: Sequence[Clip], sections: Sequence[Section]
 ) -> Anchor | None:
     """The first of the first ``EDGE_CLIPS`` clips that begins one of the first ``EDGE_SECTIONS`` sections."""
+    front = _matchable(sections)[:EDGE_SECTIONS]
     for clip in clips[:EDGE_CLIPS]:
-        if clip.index in heard and (hit := _best(heard[clip.index], sections[:EDGE_SECTIONS])):
+        if clip.index in heard and (hit := _best(heard[clip.index], front)):
             return Anchor(clip.index, hit[0], hit[1])
     return None
 
@@ -109,13 +114,14 @@ def end_probe_clips(clips: Sequence[Clip], sections: Sequence[Section], rate: fl
     last_body = body[-1] if body else len(sections) - 1
     total = clips[-1].end
     probes: list[int] = []
-    for s in reversed(sections[-EDGE_SECTIONS:]):
-        if s["index"] > last_body or s["word_count"] < MIN_SECTION_WORDS:
+    for s in reversed(_matchable(sections)[-EDGE_SECTIONS:]):
+        if s["index"] > last_body:
             continue
         words = sum(x["word_count"] for x in sections[s["index"] : last_body + 1])
-        k = _nearest(clips, total - words * rate)
-        if k not in probes:
-            probes.append(k)
+        near = _nearest(clips, total - words * rate)
+        for k in (near, near - 1, near + 1):  # pace drifts; the neighbours are cheap to check
+            if 0 <= k < len(clips) and k not in probes:
+                probes.append(k)
     return probes
 
 
@@ -130,7 +136,7 @@ def find_end(
     Walks the last ``EDGE_CLIPS`` clips from the end, comparing each with the
     last ``EDGE_SECTIONS`` sections; failing that, tries :func:`end_probe_clips`.
     """
-    tail = list(reversed(sections[-EDGE_SECTIONS:]))
+    tail = list(reversed(_matchable(sections)[-EDGE_SECTIONS:]))
     order = [c.index for c in reversed(clips[-EDGE_CLIPS:])]
     order += [k for k in end_probe_clips(clips, sections, rate) if k not in order]
     for k in order:

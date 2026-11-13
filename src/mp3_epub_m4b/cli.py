@@ -142,6 +142,10 @@ def _require_tools(align_by: AlignMode, whisper_model: Path | None = None) -> No
             raise typer.BadParameter(f"{e}; or pass --align-by silence") from e
 
 
+def _has_terminal() -> bool:
+    return sys.stdin.isatty()
+
+
 def _resolve_hint(audio: Path) -> str:
     return f'waiting for input; answer it with: mp3-epub-m4b resolve "{audio}"'
 
@@ -214,7 +218,7 @@ def convert(
     if not dry_run:
         for label, free_gb in low_space(work_dir, out_dir):
             logger.warning(f"only {free_gb:.0f}GB free on the {label} volume")
-    opts.interactive = sys.stdin.isatty()
+    opts.interactive = _has_terminal()
     try:
         final = _process_book(audio, epub, out_dir, opts, dry_run)
     except NeedsInput:
@@ -480,6 +484,9 @@ def resolve(
         state = None
     if state is None or "pending_question" not in state or "job" not in state:
         logger.error(f"nothing to resolve for {book.name} (no waiting question in {state_path})")
+        raise typer.Exit(1)
+    if not _has_terminal():
+        logger.error("resolve needs a terminal to ask in; run it in your own terminal")
         raise typer.Exit(1)
     job = state["job"]
     opts = options_from_json(job["options"])

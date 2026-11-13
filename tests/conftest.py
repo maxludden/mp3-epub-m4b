@@ -231,7 +231,7 @@ def _xhtml(title: str, body: str) -> str:
     )
 
 
-def make_epub_with_matter(path: Path, with_nav: bool = True) -> None:
+def make_epub_with_matter(path: Path, with_nav: bool = True, sample: bool = False) -> None:
     """Write an EPUB 3 with front matter, the three ``CHAPTERS`` and back matter, all in the TOC.
 
     Each chapter's text starts with its ``ANCHORED_OPENINGS`` sentence and has
@@ -245,6 +245,8 @@ def make_epub_with_matter(path: Path, with_nav: bool = True) -> None:
         sections.append((ch.title, f"{opening} {'word ' * filler}".strip()))
     for title, n in BACK_MATTER:
         sections.append((title, " ".join(["back"] * n)))
+    if sample:  # a preview of the next book, which looks like a story chapter
+        sections.append(("Next Book: Chapter 1", " ".join(["preview"] * 400)))
     files: dict[str, str] = {}
     items, spine, links = [], [], []
     for k, (title, body) in enumerate(sections):

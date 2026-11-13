@@ -253,6 +253,7 @@ def test_resolve_answers_and_carries_on(tmp_path: Path, monkeypatch: pytest.Monk
     CliRunner().invoke(app, ["convert", str(mp3), str(epub), "--work-dir", str(work), "--dry-run"])
     answers = iter(["section:2", "section:4"])
     monkeypatch.setattr("mp3_epub_m4b.prompt.ask", lambda q, **_k: next(answers))
+    monkeypatch.setattr("mp3_epub_m4b.cli._has_terminal", lambda: True)
     result = CliRunner().invoke(app, ["resolve", str(mp3), "--work-dir", str(work)])
     assert result.exit_code == 0, result.output
     assert "Fate = Doom" in result.output  # the dry run's chapter table
@@ -308,3 +309,11 @@ def test_anchored_is_the_default_and_needs_whisper(
         ],
     )
     assert "whisper" not in ok.output
+
+
+def test_resolve_needs_a_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mp3, epub = _anchored_book(tmp_path, monkeypatch)
+    work = tmp_path / "w"
+    CliRunner().invoke(app, ["convert", str(mp3), str(epub), "--work-dir", str(work), "--dry-run"])
+    result = CliRunner().invoke(app, ["resolve", str(mp3), "--work-dir", str(work)])
+    assert result.exit_code == 1 and "needs a terminal" in result.output

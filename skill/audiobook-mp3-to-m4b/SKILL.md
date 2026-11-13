@@ -65,7 +65,10 @@ What the choices mean:
 - `section:<i>`: the narrator begins this section in the clip.
 - `chapter:<n>`: chapter n starts at this point.
 - `clip:next` / `clip:prev`: none of these; listen to the next or previous clip instead.
+- `more`: show more sections (the right one isn't listed yet).
 - `not-a-boundary`: this is a pause inside a chapter, not a chapter start.
+- `accept`: keep the chapter where it is, because its length is just unusual. It stays
+  flagged in the chapter table.
 
 ## Running it with the CLI (no MCP server)
 

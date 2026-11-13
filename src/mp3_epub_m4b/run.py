@@ -68,6 +68,7 @@ from mp3_epub_m4b.anchors import (
     LISTEN_SECONDS,
     Anchor,
     Clip,
+    Placement,
     clips_from_gaps,
     closest_chapters,
     confirm_candidates,
@@ -94,7 +95,7 @@ from mp3_epub_m4b.chapters import (
     deviating_segments,
     silence_doubts,
 )
-from mp3_epub_m4b.epub_extract import EpubResult, Section, extract_epub
+from mp3_epub_m4b.epub_extract import Chapter, EpubResult, Section, extract_epub
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError, ffprobe_duration, scan_silences
 from mp3_epub_m4b.questions import (
     AnchoredProgress,
@@ -976,6 +977,27 @@ class Pipeline:
         best = max(scored, default=(0.0, -1))
         return best[1] if best[0] > 0.0 else None
 
+    def _edge_question(
+        self, kind: Literal["start", "end"], clips: list[Clip], k: int, sections: list[Section],
+        suggested: int | None,
+    ) -> Question:  # fmt: skip
+        """The start or end question about clip ``k``, on the section page the person is at."""
+        offset = self._anchored().get("offset", {}).get(kind, 0)
+        path = self._clip_path(kind, clips[k].start)
+        if kind == "start":
+            return start_question(
+                clips[k], self._text(str(k)), sections, suggested, path,
+                offset=offset, last_clip=k == len(clips) - 1,
+            )  # fmt: skip
+        return end_question(clips[k], self._text(str(k)), sections, suggested, path, offset=offset)
+
+    def _reask(self, kind: Literal["start", "end"], clips: list[Clip], k: int) -> None:
+        """Forget the ``kind`` anchor so the person is asked about clip ``k`` next."""
+        prog = self._anchored()
+        prog[kind] = None
+        prog.setdefault("ask_clip", {})[kind] = k
+        self._save()
+
     def _edge_anchor(
         self,
         kind: Literal["start", "end"],
@@ -992,7 +1014,6 @@ class Pipeline:
             NeedsInput: When a person must pick the section.
         """
         prog = self._anchored()
-        ask_q = start_question if kind == "start" else end_question
         direction: Literal[1, -1] = 1 if kind == "start" else -1
         anchor = prog.get(kind)
         if anchor is None:
@@ -1010,15 +1031,7 @@ class Pipeline:
                     found = find_end(self._heard_by_clip(), clips, sections, rate)
                 if found is None:
                     k = 0 if kind == "start" else len(clips) - 1
-                    self._ask(
-                        ask_q(
-                            clips[k],
-                            self._text(str(k)),
-                            sections,
-                            None,
-                            self._clip_path(kind, clips[k].start),
-                        )
-                    )
+                    self._ask(self._edge_question(kind, clips, k, sections, None))
                 anchor = {"clip": found.clip, "section": found.section, "confirmed": False}
                 prog[kind] = anchor
                 self._save()
@@ -1026,14 +1039,7 @@ class Pipeline:
                 k = min(max(ask, 0), len(clips) - 1)
                 if not self._hear(clips, [k]):
                     return None
-                q = ask_q(
-                    clips[k],
-                    self._text(str(k)),
-                    sections,
-                    self._suggest(k, sections),
-                    self._clip_path(kind, clips[k].start),
-                )
-                self._ask(q)
+                self._ask(self._edge_question(kind, clips, k, sections, self._suggest(k, sections)))
         if not anchor["confirmed"]:
             neighbour = next_narrated(sections, anchor["section"], direction)
             if neighbour is not None:
@@ -1051,15 +1057,7 @@ class Pipeline:
                         f"not confirmed by {sections[neighbour]['title']!r}"
                     )
                     k = anchor["clip"]
-                    self._ask(
-                        ask_q(
-                            clips[k],
-                            self._text(str(k)),
-                            sections,
-                            anchor["section"],
-                            self._clip_path(kind, clips[k].start),
-                        )
-                    )
+                    self._ask(self._edge_question(kind, clips, k, sections, anchor["section"]))
             anchor["confirmed"] = True
             self._save()
             logger.info(
@@ -1077,7 +1075,8 @@ class Pipeline:
 
         Raises:
             NeedsInput: When a person must decide (the question is saved first).
-            RuntimeError: If the checkpoint predates section extraction.
+            RuntimeError: If the EPUB has no sections, or the audio has no
+                chapter-length pauses to split it at.
         """
         self._deadline = time.monotonic() + budget
         align = self._align()
@@ -1085,43 +1084,50 @@ class Pipeline:
         epub = self._epub()
         sections = epub.get("sections")
         if not sections:
-            raise RuntimeError(f"{self.state_path} has no EPUB sections; re-run with --fresh")
+            raise RuntimeError(
+                f"no sections found in {self.epub.name} (or the checkpoint predates them; "
+                "re-run with --fresh)"
+            )
         total = self._duration()
         clips = clips_from_gaps(self._get_silences().chapter_gaps(), total)
+        if len(clips) < 2:
+            raise RuntimeError(
+                "found no chapter-length pauses in the audio to anchor on; "
+                "use --align-by transcribe"
+            )
         if not self._hear(clips, edge_clips(clips)):
             return False
         rate0 = provisional_rate(sections, total)
         start = self._edge_anchor("start", clips, sections, rate0)
         if start is None:
             return False
+        if (
+            self.detect_intro
+            and clips[start["clip"]].start > self.intro_max_len
+            and not start.get("person")
+        ):
+            # everything before the start would become "Opening Credits"; too long to trust
+            logger.info(
+                f"{clips[start['clip']].start:.0f}s before the start is too long for credits"
+            )
+            self._reask("start", clips, 0)
+            self._ask(self._edge_question("start", clips, 0, sections, None))
         end = self._edge_anchor("end", clips, sections, rate0)
         if end is None:
             return False
-        if end["section"] < start["section"] or end["clip"] < start["clip"]:
-            prog = self._anchored()
-            prog["end"] = None
-            prog.setdefault("ask_clip", {})["end"] = len(clips) - 1
-            self._save()
+        if end["section"] < start["section"] or (
+            end["section"] > start["section"] and end["clip"] <= start["clip"]
+        ):
             k = len(clips) - 1
-            self._ask(
-                end_question(
-                    clips[k],
-                    self._text(str(k)),
-                    sections,
-                    None,
-                    self._clip_path("end", clips[k].start),
-                )
-            )
+            self._reask("end", clips, k)
+            self._ask(self._edge_question("end", clips, k, sections, None))
 
         chapters = narrated_chapters(sections, start["section"], end["section"])
         epub["chapters"] = chapters
         n = len(chapters)
         prog = self._anchored()
-        fixed = {
-            **prog.get("fixed", {}),
-            "1": clips[start["clip"]].start,
-            str(n): clips[end["clip"]].start,
-        }
+        answered = prog.get("fixed", {})
+        fixed = {**answered, "1": clips[start["clip"]].start, str(n): clips[end["clip"]].start}
         if n == 1:
             fixed = {"1": clips[start["clip"]].start}
         rate = speaking_rate(chapters, fixed["1"], total)
@@ -1133,44 +1139,79 @@ class Pipeline:
             total_dur=total,
             rate=rate,
         )
-        boundaries = dict(placed.boundaries)
-        if not self.detect_intro:
-            boundaries["1"] = 0.0
-        segments = build_segments(
+        # length-check from the anchors (credits before the start are not chapter 1's)
+        checked = build_segments(
             chapters,
-            boundaries,
+            placed.boundaries,
             total_dur=total,
             outro_start=None,
             intro_title=self.intro_title,
             outro_title=self.outro_title,
         )
-        chapter_segs = [s for s in segments if "words" in s]
+        chapter_segs = [seg for seg in checked if "words" in seg]
+        if any(seg["duration"] <= 0.5 for seg in chapter_segs):
+            raise RuntimeError("anchored placement produced an empty chapter; re-run with --fresh")
+        accepted = set(prog.get("accepted", []))
 
-        def settled(c: int) -> bool:  # both ends fixed by an anchor or a person
-            return (c == 1 or str(c) in fixed) and (c == n or str(c + 1) in fixed)
-
-        for c in length_outliers(segments, rate):
-            if settled(c):
+        for c in length_outliers(checked, rate):
+            if c in accepted:
                 continue
-            m = c + 1 if c < n and str(c + 1) not in fixed else c
-            t = placed.boundaries[str(m)]
-            clip = next(
-                (k for k in clips if abs(k.start - t) < 0.01), Clip(-1, t, t + LISTEN_SECONDS)
-            )
-            candidates = [
-                k
-                for k in closest_chapters(t, chapters, fixed["1"], rate)
-                if str(k) not in fixed  # anchors and earlier answers are settled
-                and all(v < t for j, v in fixed.items() if int(j) < k)
-                and all(v > t for j, v in fixed.items() if int(j) > k)
-            ]
-            allow_reject = m not in placed.fallback
-            if not candidates and not allow_reject:
-                continue  # nothing a person could change here
-            key = str(clip.index) if clip.index >= 0 else f"@{t:.3f}"
-            self._listen(key, t)
-            seg = chapter_segs[c - 1]
-            q = chapter_question(
+            # question the chapter's end first, then its start
+            for b in (c + 1, c):
+                if b > n:
+                    continue  # chapter n ends where the audio does
+                anchor_kind: Literal["start", "end"] | None = (
+                    "start" if b == 1 else "end" if b == n else None
+                )
+                if anchor_kind is not None:
+                    a = start if anchor_kind == "start" else end
+                    if a.get("person"):
+                        continue
+                    k = a["clip"]
+                    self._reask(anchor_kind, clips, k)
+                    self._ask(self._edge_question(anchor_kind, clips, k, sections, a["section"]))
+                if str(b) in answered:
+                    continue
+                self._ask_chapter(c, b, clips, chapters, fixed, placed, chapter_segs[c - 1], rate)
+
+        boundaries = dict(placed.boundaries)
+        if not self.detect_intro:
+            boundaries["1"] = 0.0
+        align["boundaries"] = boundaries
+        # the length check decides confidence here; chapters the person kept stay flagged
+        align["low_confidence"] = sorted(accepted)
+        align["fallback"] = placed.fallback
+        align["next"] = n + 1
+        self._save()
+        logger.info(f"anchored: {n} chapters placed and length-checked (rate {rate:.3f} s/word)")
+        return self._finish_align(align, n, total)
+
+    def _ask_chapter(
+        self,
+        c: int,
+        b: int,
+        clips: list[Clip],
+        chapters: list[Chapter],
+        fixed: dict[str, float],
+        placed: Placement,
+        seg: Segment,
+        rate: float,
+    ) -> NoReturn:
+        """Ask which chapter starts at boundary ``b``, because chapter ``c``'s length doesn't fit."""
+        t = placed.boundaries[str(b)]
+        clip = next((k for k in clips if abs(k.start - t) < 0.01), Clip(-1, t, t + LISTEN_SECONDS))
+        nearby = sorted({b, *closest_chapters(t, chapters, fixed["1"], rate)})
+        candidates = [
+            k
+            for k in nearby
+            if str(k) not in fixed  # anchors and earlier answers are settled
+            and all(v < t for j, v in fixed.items() if int(j) < k)
+            and all(v > t for j, v in fixed.items() if int(j) > k)
+        ]
+        key = str(clip.index) if clip.index >= 0 else f"@{t:.3f}"
+        self._listen(key, t)
+        self._ask(
+            chapter_question(
                 c,
                 clip,
                 self._text(key),
@@ -1179,17 +1220,9 @@ class Pipeline:
                 self._clip_path("chapter", t),
                 actual=seg["duration"],
                 expected=seg.get("words", 0) * rate,
-                allow_reject=allow_reject,
+                allow_reject=b not in placed.fallback,
             )
-            self._ask(q)
-
-        align["boundaries"] = boundaries
-        align["low_confidence"] = []  # the length check is what decides confidence here
-        align["fallback"] = placed.fallback
-        align["next"] = n + 1
-        self._save()
-        logger.info(f"anchored: {n} chapters placed and length-checked (rate {rate:.3f} s/word)")
-        return self._finish_align(align, n, total)
+        )
 
     @staticmethod
     def _interpolate_unmatched(align: AlignProgress, words: list[int], total_dur: float) -> None:

@@ -33,7 +33,15 @@ def test_start_question_offers_the_first_five_matchable_sections_and_next_clip()
     q = start_question(CLIP, "this is audible", many, suggested=2, clip_path=WAV)  # type: ignore[arg-type]
     assert q["kind"] == "start" and q["clip"] == 1 and q["clip_start"] == 32.0
     assert q["clip_seconds"] == 10.0 and q["clip_path"] == str(WAV)
-    assert ids(q) == ["section:2", "section:3", "section:4", "section:5", "section:6", "clip:next"]
+    assert ids(q) == [
+        "section:2",
+        "section:3",
+        "section:4",
+        "section:5",
+        "section:6",
+        "more",
+        "clip:next",
+    ]
     assert q["suggested"] == "section:2"
     assert q["choices"][0]["label"] == "First Light"
     assert q["choices"][0]["text"].startswith("Morning fog rolled")
@@ -42,26 +50,26 @@ def test_start_question_offers_the_first_five_matchable_sections_and_next_clip()
 
 def test_end_question_offers_the_last_five_and_previous_clip() -> None:
     q = end_question(CLIP, "tone", SECTIONS, suggested=None, clip_path=WAV)
-    assert ids(q) == ["section:2", "section:3", "section:4", "section:5", "clip:prev"]
+    assert ids(q) == ["section:2", "section:3", "section:4", "section:5", "clip:prev"]  # clip 1
     assert q["suggested"] is None and q["kind"] == "end"
 
 
 def test_chapter_question_lists_candidates_and_can_reject() -> None:
     chapters = narrated_chapters(SECTIONS, 2, 4)
     q = chapter_question(2, CLIP, "tone", chapters, [2, 3], WAV, actual=120.0, expected=60.0)
-    assert ids(q) == ["chapter:2", "chapter:3", "not-a-boundary"]
+    assert ids(q) == ["chapter:2", "chapter:3", "not-a-boundary", "accept"]
     assert q["chapter"] == 2 and q["suggested"] is None
     assert "Chapter 2 (Tom & Jerry) is 0:02:00 long" in q["prompt"]
     q2 = chapter_question(
         2, CLIP, "tone", chapters, [2], WAV, actual=1, expected=60, allow_reject=False
     )
-    assert ids(q2) == ["chapter:2"]
+    assert ids(q2) == ["chapter:2", "accept"]
 
 
 def test_apply_answer_start_section_confirms() -> None:
     prog: AnchoredProgress = {}
     apply_answer(prog, start_question(CLIP, "", SECTIONS, None, WAV), "section:2")
-    assert prog["start"] == {"clip": 1, "section": 2, "confirmed": True}
+    assert prog["start"] == {"clip": 1, "section": 2, "confirmed": True, "person": True}
 
 
 def test_apply_answer_next_and_previous_clip() -> None:
@@ -92,3 +100,36 @@ def test_question_round_trips_json_and_needs_input_carries_it() -> None:
     assert json.loads(json.dumps(q)) == q
     assert NeedsInput(q).question is q
     assert "Where does the book start?" in str(NeedsInput(q))
+
+
+def test_more_sections_pages_through_the_list() -> None:
+    many = [{**SECTIONS[4], "index": i, "title": f"C{i}"} for i in range(12)]
+    q = start_question(CLIP, "", many, None, WAV)  # type: ignore[arg-type]
+    assert ids(q)[-2:] == ["more", "clip:next"]
+    prog: AnchoredProgress = {}
+    apply_answer(prog, q, "more")
+    assert prog["offset"]["start"] == 5 and prog["ask_clip"]["start"] == 1
+    q2 = start_question(CLIP, "", many, None, WAV, offset=5)  # type: ignore[arg-type]
+    assert ids(q2)[:5] == [f"section:{i}" for i in range(5, 10)]
+
+
+def test_no_next_clip_on_the_last_clip() -> None:
+    q = start_question(CLIP, "", SECTIONS, None, WAV, last_clip=True)
+    assert "clip:next" not in ids(q)
+    q2 = end_question(Clip(0, 0.0, 9.0), "", SECTIONS, None, WAV)
+    assert "clip:prev" not in ids(q2)
+
+
+def test_chapter_question_can_keep_the_chapter_as_is() -> None:
+    chapters = narrated_chapters(SECTIONS, 2, 4)
+    q = chapter_question(2, CLIP, "", chapters, [2], WAV, actual=1, expected=2)
+    assert ids(q)[-1] == "accept"
+    prog: AnchoredProgress = {}
+    apply_answer(prog, q, "accept")
+    assert prog["accepted"] == [2]
+
+
+def test_section_answers_are_marked_as_the_persons() -> None:
+    prog: AnchoredProgress = {}
+    apply_answer(prog, end_question(CLIP, "", SECTIONS, None, WAV), "section:4")
+    assert prog["end"] == {"clip": 1, "section": 4, "confirmed": True, "person": True}

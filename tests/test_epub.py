@@ -134,3 +134,10 @@ def test_sections_include_front_and_back_matter(tmp_path: Path, with_nav: bool) 
     assert secs[2]["opening"].startswith(ANCHORED_OPENINGS[0])
     assert abs(secs[3]["word_count"] - CHAPTERS[1].seconds * WORDS_PER_SECOND) < 10
     assert len(res["chapters"]) == 3  # the chapter list used by the other modes is unchanged
+
+
+def test_a_sample_of_the_next_book_after_back_matter_is_back_matter(tmp_path: Path) -> None:
+    epub = tmp_path / "b.epub"
+    make_epub_with_matter(epub, sample=True)
+    secs = extract_epub(epub, tmp_path / "x")["sections"]
+    assert secs[-1]["title"] == "Next Book: Chapter 1" and secs[-1]["kind"] == "back"

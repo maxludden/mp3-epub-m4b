@@ -268,7 +268,12 @@ def test_answer_question_saves_and_relaunches(
     assert result["pid"] == 777 and launched == [["python", "-m", "x"]]
     state = json.loads((work / "state.json").read_text())
     assert "pending_question" not in state
-    assert state["align"]["anchored"]["start"] == {"clip": 0, "section": 2, "confirmed": True}
+    assert state["align"]["anchored"]["start"] == {
+        "clip": 0,
+        "section": 2,
+        "confirmed": True,
+        "person": True,
+    }
     with pytest.raises(ToolError, match="no question"):
         answer_question(str(audio), "section:2")
 

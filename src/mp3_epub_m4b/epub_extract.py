@@ -584,11 +584,15 @@ def _extract_sections(
         raw.append((title, words, opening, matter))
 
     story = [i for i, r in enumerate(raw) if not r[3]]
-    lo, hi = (story[0], story[-1]) if story else (len(raw), -1)
+    lo = story[0] if story else len(raw)
+    # the first front/back-matter heading after the story starts the back matter; whatever
+    # follows it (a sample of the next book, ads) is back matter too, however story-like
+    after = next((i for i in range(lo, len(raw)) if raw[i][3]), len(raw))
+    hi = max((i for i in story if i < after), default=-1)
     sections: list[Section] = []
     for i, (title, words, opening, matter) in enumerate(raw):
         kind: Literal["front", "body", "back"] = (
-            "front" if matter and i < lo else "back" if matter and i > hi else "body"
+            "front" if matter and i < lo else "back" if i > hi else "body"
         )
         sections.append(
             {"index": i, "title": title, "kind": kind, "word_count": words, "opening": opening}

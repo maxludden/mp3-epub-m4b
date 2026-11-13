@@ -223,3 +223,22 @@ def test_closest_chapters_by_expected_start() -> None:
     chapters = narrated_chapters(SECTIONS, 2, 4)  # expected starts 0, 30, 90 at 0.1 s/word
     assert closest_chapters(85.0, chapters, 0.0, 0.1, k=2) == [2, 3]
     assert closest_chapters(0.0, chapters, 0.0, 0.1) == [1, 2, 3]
+
+
+# ----------------------------------------------------------- review fixes
+
+
+def test_section_score_matches_a_short_heard_window() -> None:
+    # a 10 s window that starts in the silence and spends 3 s on the heading hears ~8 words
+    heard = speak(" ".join(OPEN[1].split()[:8]), 0)
+    assert section_score(heard, SECTIONS[3]) > 0.0
+
+
+def test_find_start_looks_past_long_front_matter() -> None:
+    stubs = [
+        sec(i, f"Front {i}", 20, f"front matter page {i} words here", "front") for i in range(12)
+    ]
+    first = sec(12, "First Light", 300, OPEN[0] + FILLER)
+    clips = clips_from_gaps([32.0], 50.0)
+    a = find_start({0: speak(OPEN[0] + FILLER, 0)}, clips, [*stubs, first])
+    assert a is not None and a.section == 12
