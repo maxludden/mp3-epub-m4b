@@ -59,11 +59,31 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NoReturn
 
 from loguru import logger
 
 from mp3_epub_m4b.align import AlignOptions, align_book
+from mp3_epub_m4b.anchors import (
+    LISTEN_SECONDS,
+    Anchor,
+    Clip,
+    clips_from_gaps,
+    closest_chapters,
+    confirm_candidates,
+    confirms,
+    edge_clips,
+    end_probe_clips,
+    find_end,
+    find_start,
+    length_outliers,
+    narrated_chapters,
+    next_narrated,
+    place_chapters,
+    provisional_rate,
+    section_score,
+    speaking_rate,
+)
 from mp3_epub_m4b.chapters import (
     COMPANION_MIN_SILENCE,
     FALLBACK_SPAN,
@@ -74,8 +94,17 @@ from mp3_epub_m4b.chapters import (
     deviating_segments,
     silence_doubts,
 )
-from mp3_epub_m4b.epub_extract import EpubResult, extract_epub
+from mp3_epub_m4b.epub_extract import EpubResult, Section, extract_epub
 from mp3_epub_m4b.ffmpeg_tools import FFmpegError, ffprobe_duration, scan_silences
+from mp3_epub_m4b.questions import (
+    AnchoredProgress,
+    NeedsInput,
+    Question,
+    apply_answer,
+    chapter_question,
+    end_question,
+    start_question,
+)
 from mp3_epub_m4b.state import (
     STAGES,
     AlignProgress,
@@ -91,6 +120,7 @@ from mp3_epub_m4b.transcribe import (
     CONFIDENT_SCORE,
     WIDEN_STEPS,
     WhisperError,
+    Word,
     boundary_in_gap,
     estimate_rate,
     expected_start,
@@ -102,7 +132,7 @@ from mp3_epub_m4b.transcribe import (
 
 SCAN_NOISE_DB = -30.0  # silence threshold used for the whole-file scan
 CHAPTER_ONE_WINDOW = 300.0  # how far into the file (s) to look for chapter 1's opening words
-ALIGN_BY_CHOICES = ("silence", "transcribe", "auto")
+ALIGN_BY_CHOICES = ("anchored", "silence", "transcribe", "auto")
 AUDIO_CHANNELS = 1  # output is mono ...
 AUDIO_SAMPLE_RATE = 32000  # ... at 32 kHz, which is plenty for narrated speech
 
@@ -291,6 +321,8 @@ class Pipeline:
         self.state_path = self.work_dir / "state.json"
         self.silences_path = self.work_dir / "silences.json"
         self._silences: SilenceIndex | None = None
+        self._whisper: tuple[str, Path] | None = None
+        self._deadline = 0.0
         self.state: PipelineState = self._load_state()
 
     # ------------------------------------------------------------------ state
@@ -313,7 +345,7 @@ class Pipeline:
         }
         # added only when non-default, so checkpoints from before this option still resume
         # (auto starts as silence, so it fingerprints like silence)
-        if self.align_by == "transcribe":
+        if self.align_by in ("transcribe", "anchored"):
             fingerprint["align_by"] = self.align_by
             if self.whisper_model is not None:
                 fingerprint["whisper_model"] = self.whisper_model.name
@@ -540,6 +572,8 @@ class Pipeline:
         """
         align = self._align()
         method = align.get("method")
+        if self.align_by == "anchored":
+            return self._align_anchored(budget)
         if self.align_by == "silence" and method == "transcribe":
             raise StateMismatchError(
                 f"{self.state_path} was aligned by transcript; use --fresh to align by silence"
@@ -845,6 +879,313 @@ class Pipeline:
             self._interpolate_unmatched(align, words, total_dur)
         return self._finish_align(align, n_chapters, total_dur)
 
+    # ------------------------------------------------------- anchored align
+    def answer(self, choice_id: str) -> None:
+        """Record the person's answer to the pending question; the next :meth:`run` carries on.
+
+        Raises:
+            RuntimeError: If no question is pending.
+            ValueError: If ``choice_id`` is not one of its choices.
+        """
+        question = self.state.get("pending_question")
+        if question is None:
+            raise RuntimeError("no question is waiting for an answer")
+        apply_answer(self._anchored(), question, choice_id)
+        del self.state["pending_question"]
+        self._save()
+        logger.info(f"answer recorded: {choice_id}")
+
+    def _anchored(self) -> AnchoredProgress:
+        return self._align().setdefault("anchored", {})
+
+    def _heard(self, key: str) -> list[Word]:
+        return [Word(s, e, t) for s, e, t in self._anchored().get("heard", {}).get(key, [])]
+
+    def _heard_by_clip(self) -> dict[int, list[Word]]:
+        return {int(k): self._heard(k) for k in self._anchored().get("heard", {}) if k.isdigit()}
+
+    def _listen(self, key: str, start: float) -> list[Word]:
+        """Transcribe ``LISTEN_SECONDS`` from ``start`` (cached in the checkpoint under ``key``)."""
+        heard = self._anchored().setdefault("heard", {})
+        if key not in heard:
+            if self._whisper is None:
+                self._whisper = find_whisper(self.whisper_model)
+            binary, model = self._whisper
+            seconds = max(0.5, min(LISTEN_SECONDS, self._duration() - start))
+            words = transcribe_window(
+                self.mp3,
+                start,
+                seconds,
+                binary=binary,
+                model=model,
+                scratch=self.work_dir / "whisper",
+            )
+            heard[key] = [[w.start, w.end, w.text] for w in words]
+            self._save()
+        return self._heard(key)
+
+    def _hear(self, clips: list[Clip], indexes: list[int]) -> bool:
+        """Make sure each clip's opening is transcribed; ``False`` if the time slice ran out first."""
+        missing = [k for k in indexes if str(k) not in self._anchored().get("heard", {})]
+        for done, k in enumerate(missing):
+            if done and time.monotonic() >= self._deadline:
+                return False
+            self._status(
+                f"listening to clip {k + 1}/{len(clips)} at {clips[k].start:.0f}s",
+                done,
+                len(missing),
+                force=True,
+            )
+            self._listen(str(k), clips[k].start)
+        return True
+
+    def _cut_clip(self, start: float, path: Path) -> None:
+        """Write ``LISTEN_SECONDS`` of the source audio from ``start`` to ``path`` for a person to play."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-ss", f"{start:.3f}", "-t", f"{LISTEN_SECONDS:.3f}",
+            "-i", str(self.mp3), "-vn", "-ar", "16000", "-ac", "1", str(path),
+        ]  # fmt: skip
+        subprocess.run(cmd, check=True, capture_output=True)
+
+    def _ask(self, question: Question) -> NoReturn:
+        """Save ``question`` as pending (with its clip on disk) and raise :class:`NeedsInput`."""
+        path = Path(question["clip_path"])
+        if not path.exists():
+            self._cut_clip(question["clip_start"], path)
+        self.state["pending_question"] = question
+        self._save()
+        self._status(f"waiting for input: {question['prompt']}", force=True)
+        logger.warning(f"waiting for input: {question['prompt']}")
+        raise NeedsInput(question)
+
+    def _clip_path(self, kind: str, start: float) -> Path:
+        return self.work_dir / "questions" / f"{kind}-{start:09.3f}.wav"
+
+    def _text(self, key: str) -> str:
+        return " ".join(w.text for w in self._heard(key))
+
+    def _suggest(self, clip: int, sections: list[Section]) -> int | None:
+        scored = [(section_score(self._heard(str(clip)), s), s["index"]) for s in sections]
+        best = max(scored, default=(0.0, -1))
+        return best[1] if best[0] > 0.0 else None
+
+    def _edge_anchor(
+        self,
+        kind: Literal["start", "end"],
+        clips: list[Clip],
+        sections: list[Section],
+        rate: float,
+    ) -> dict[str, Any] | None:
+        """Find and confirm the start (``kind="start"``) or end anchor, asking when needed.
+
+        Returns:
+            The confirmed anchor, or ``None`` if the time slice ran out (call again).
+
+        Raises:
+            NeedsInput: When a person must pick the section.
+        """
+        prog = self._anchored()
+        ask_q = start_question if kind == "start" else end_question
+        direction: Literal[1, -1] = 1 if kind == "start" else -1
+        anchor = prog.get(kind)
+        if anchor is None:
+            ask = prog.get("ask_clip", {}).get(kind)
+            if ask is None:
+                heard = self._heard_by_clip()
+                found = (
+                    find_start(heard, clips, sections)
+                    if kind == "start"
+                    else find_end(heard, clips, sections, rate)
+                )
+                if found is None and kind == "end":
+                    if not self._hear(clips, end_probe_clips(clips, sections, rate)):
+                        return None
+                    found = find_end(self._heard_by_clip(), clips, sections, rate)
+                if found is None:
+                    k = 0 if kind == "start" else len(clips) - 1
+                    self._ask(
+                        ask_q(
+                            clips[k],
+                            self._text(str(k)),
+                            sections,
+                            None,
+                            self._clip_path(kind, clips[k].start),
+                        )
+                    )
+                anchor = {"clip": found.clip, "section": found.section, "confirmed": False}
+                prog[kind] = anchor
+                self._save()
+            else:
+                k = min(max(ask, 0), len(clips) - 1)
+                if not self._hear(clips, [k]):
+                    return None
+                q = ask_q(
+                    clips[k],
+                    self._text(str(k)),
+                    sections,
+                    self._suggest(k, sections),
+                    self._clip_path(kind, clips[k].start),
+                )
+                self._ask(q)
+        if not anchor["confirmed"]:
+            neighbour = next_narrated(sections, anchor["section"], direction)
+            if neighbour is not None:
+                clip = clips[anchor["clip"]]
+                words = sections[anchor["section"] if kind == "start" else neighbour]["word_count"]
+                expected = clip.start + direction * words * rate
+                cands = confirm_candidates(
+                    Anchor(anchor["clip"], anchor["section"], 0.0), direction, clips, expected
+                )
+                if not self._hear(clips, cands):
+                    return None
+                if confirms(self._heard_by_clip(), cands, sections[neighbour]) is None:
+                    logger.info(
+                        f"{kind}: {sections[anchor['section']]['title']!r} at {clip.start:.0f}s "
+                        f"not confirmed by {sections[neighbour]['title']!r}"
+                    )
+                    k = anchor["clip"]
+                    self._ask(
+                        ask_q(
+                            clips[k],
+                            self._text(str(k)),
+                            sections,
+                            anchor["section"],
+                            self._clip_path(kind, clips[k].start),
+                        )
+                    )
+            anchor["confirmed"] = True
+            self._save()
+            logger.info(
+                f"{kind} of the book: {sections[anchor['section']]['title']!r} "
+                f"at {clips[anchor['clip']].start:.0f}s (confirmed)"
+            )
+        return anchor
+
+    def _align_anchored(self, budget: float) -> bool:
+        """Find and confirm both ends of the book, then place and length-check every chapter.
+
+        Returns:
+            ``True`` once every chapter passes (or was settled by a person) and
+            the stage has advanced to ``assemble``; ``False`` if more calls are needed.
+
+        Raises:
+            NeedsInput: When a person must decide (the question is saved first).
+            RuntimeError: If the checkpoint predates section extraction.
+        """
+        self._deadline = time.monotonic() + budget
+        align = self._align()
+        align["method"] = "anchored"
+        epub = self._epub()
+        sections = epub.get("sections")
+        if not sections:
+            raise RuntimeError(f"{self.state_path} has no EPUB sections; re-run with --fresh")
+        total = self._duration()
+        clips = clips_from_gaps(self._get_silences().chapter_gaps(), total)
+        if not self._hear(clips, edge_clips(clips)):
+            return False
+        rate0 = provisional_rate(sections, total)
+        start = self._edge_anchor("start", clips, sections, rate0)
+        if start is None:
+            return False
+        end = self._edge_anchor("end", clips, sections, rate0)
+        if end is None:
+            return False
+        if end["section"] < start["section"] or end["clip"] < start["clip"]:
+            prog = self._anchored()
+            prog["end"] = None
+            prog.setdefault("ask_clip", {})["end"] = len(clips) - 1
+            self._save()
+            k = len(clips) - 1
+            self._ask(
+                end_question(
+                    clips[k],
+                    self._text(str(k)),
+                    sections,
+                    None,
+                    self._clip_path("end", clips[k].start),
+                )
+            )
+
+        chapters = narrated_chapters(sections, start["section"], end["section"])
+        epub["chapters"] = chapters
+        n = len(chapters)
+        prog = self._anchored()
+        fixed = {
+            **prog.get("fixed", {}),
+            "1": clips[start["clip"]].start,
+            str(n): clips[end["clip"]].start,
+        }
+        if n == 1:
+            fixed = {"1": clips[start["clip"]].start}
+        rate = speaking_rate(chapters, fixed["1"], total)
+        placed = place_chapters(
+            chapters,
+            self._get_silences(),
+            fixed=fixed,
+            rejected=prog.get("rejected", []),
+            total_dur=total,
+            rate=rate,
+        )
+        boundaries = dict(placed.boundaries)
+        if not self.detect_intro:
+            boundaries["1"] = 0.0
+        segments = build_segments(
+            chapters,
+            boundaries,
+            total_dur=total,
+            outro_start=None,
+            intro_title=self.intro_title,
+            outro_title=self.outro_title,
+        )
+        chapter_segs = [s for s in segments if "words" in s]
+
+        def settled(c: int) -> bool:  # both ends fixed by an anchor or a person
+            return (c == 1 or str(c) in fixed) and (c == n or str(c + 1) in fixed)
+
+        for c in length_outliers(segments, rate):
+            if settled(c):
+                continue
+            m = c + 1 if c < n and str(c + 1) not in fixed else c
+            t = placed.boundaries[str(m)]
+            clip = next(
+                (k for k in clips if abs(k.start - t) < 0.01), Clip(-1, t, t + LISTEN_SECONDS)
+            )
+            candidates = [
+                k
+                for k in closest_chapters(t, chapters, fixed["1"], rate)
+                if str(k) not in fixed  # anchors and earlier answers are settled
+                and all(v < t for j, v in fixed.items() if int(j) < k)
+                and all(v > t for j, v in fixed.items() if int(j) > k)
+            ]
+            allow_reject = m not in placed.fallback
+            if not candidates and not allow_reject:
+                continue  # nothing a person could change here
+            key = str(clip.index) if clip.index >= 0 else f"@{t:.3f}"
+            self._listen(key, t)
+            seg = chapter_segs[c - 1]
+            q = chapter_question(
+                c,
+                clip,
+                self._text(key),
+                chapters,
+                candidates,
+                self._clip_path("chapter", t),
+                actual=seg["duration"],
+                expected=seg.get("words", 0) * rate,
+                allow_reject=allow_reject,
+            )
+            self._ask(q)
+
+        align["boundaries"] = boundaries
+        align["low_confidence"] = []  # the length check is what decides confidence here
+        align["fallback"] = placed.fallback
+        align["next"] = n + 1
+        self._save()
+        logger.info(f"anchored: {n} chapters placed and length-checked (rate {rate:.3f} s/word)")
+        return self._finish_align(align, n, total)
+
     @staticmethod
     def _interpolate_unmatched(align: AlignProgress, words: list[int], total_dur: float) -> None:
         """Place unmatched chapters between their matched neighbours, by word count."""
@@ -1117,6 +1458,9 @@ class Pipeline:
         stage = self.state["stage"]
         if stage == "done":
             return True
+        pending = self.state.get("pending_question")
+        if pending is not None:
+            raise NeedsInput(pending)
         self.progress.update(stage, force=True)
         methods: dict[str, Callable[[float], bool]] = {
             "extract": self.stage_extract,

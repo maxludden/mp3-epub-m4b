@@ -43,7 +43,9 @@ class Options:
         readaloud: Alignment settings for the readaloud stage; ``None`` skips it.
         evict: Evict the source audio from local disk afterwards (iCloud Drive only).
         verify: Probe the finished M4B and report chapters, duration and streams.
-        align_by: How chapters are placed in the audio (silence or transcript).
+        align_by: How chapters are placed in the audio (anchored, silence, transcribe or auto).
+        interactive: Ask questions in the terminal when anchoring needs a decision;
+            otherwise stop and leave the question in the checkpoint.
         whisper_model: GGML model for transcript placement (default: found automatically).
     """
 
@@ -60,8 +62,9 @@ class Options:
     readaloud: AlignOptions | None = None
     evict: bool = False
     verify: bool = True
-    align_by: str = "silence"
+    align_by: str = "anchored"
     whisper_model: Path | None = None
+    interactive: bool = False
 
 
 class Granularity(StrEnum):
@@ -74,6 +77,7 @@ class Granularity(StrEnum):
 class AlignMode(StrEnum):
     """How chapter boundaries are located in the audio."""
 
+    anchored = "anchored"
     silence = "silence"
     transcribe = "transcribe"
     auto = "auto"
@@ -103,9 +107,12 @@ AlignBy = Annotated[
     AlignMode,
     typer.Option(
         "--align-by",
-        help="How chapters are placed: at detected silences; by finding each chapter's "
-        "opening words in a whisper.cpp transcript (slower, for recordings with no pause "
-        "between chapters); or auto: silence first, then transcript if silence looks unreliable.",
+        help="How chapters are placed. anchored (default): find and confirm the start and end "
+        "of the book from short whisper.cpp transcripts, place chapters at silences between "
+        "them, length-check every chapter and ask when something doesn't fit. silence: at "
+        "detected silences only. transcribe: find each chapter's opening words in a transcript "
+        "(slower, for recordings with no pause between chapters). auto: silence first, then "
+        "transcript if silence looks unreliable.",
     ),
 ]
 WhisperModel = Annotated[
@@ -114,7 +121,7 @@ WhisperModel = Annotated[
         "--whisper-model",
         dir_okay=False,
         envvar="MP3_EPUB_M4B_WHISPER_MODEL",
-        help="GGML model file for --align-by transcribe (default: found in ~/.cache).",
+        help="GGML model file for --align-by anchored or transcribe (default: found in ~/.cache).",
     ),
 ]
 OutDir = Annotated[

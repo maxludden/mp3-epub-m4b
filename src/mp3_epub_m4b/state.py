@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from loguru import logger
 
 from mp3_epub_m4b.epub_extract import EpubResult
+
+if TYPE_CHECKING:  # questions imports this module
+    from mp3_epub_m4b.questions import AnchoredProgress, Question
 
 STAGES = ("extract", "scan", "align", "assemble", "deliver", "readaloud")
 
@@ -43,7 +46,8 @@ class AlignProgress(TypedDict):
     fallback: list[int]  # chapters placed by a fixed offset (no gap found)
     outro_start: NotRequired[float | None]  # set once the outro search has run
     unmatched: NotRequired[list[int]]  # transcribe mode: chapters whose opening was never heard
-    method: NotRequired[str]  # how chapters are being placed: "silence" or "transcribe"
+    method: NotRequired[str]  # how chapters are being placed: "silence", "transcribe" or "anchored"
+    anchored: NotRequired[AnchoredProgress]  # anchored mode: transcripts, anchors, answers
 
 
 class PipelineState(TypedDict):
@@ -59,6 +63,8 @@ class PipelineState(TypedDict):
     deliver_bytes_done: NotRequired[int]
     final_output: NotRequired[str]
     readaloud_output: NotRequired[str]  # the aligned EPUB 3, once the readaloud stage is done
+    pending_question: NotRequired[Question]  # anchored mode: waiting for a person to answer this
+    job: NotRequired[dict[str, Any]]  # how the run was started, so `resolve` can carry it on
 
 
 class StateMismatchError(RuntimeError):
