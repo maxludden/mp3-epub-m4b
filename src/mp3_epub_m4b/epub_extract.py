@@ -22,7 +22,7 @@ import warnings
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, NamedTuple, NotRequired, TypedDict
+from typing import Annotated, Literal, NamedTuple, NotRequired, TypedDict
 from urllib.parse import unquote
 
 import typer
@@ -61,12 +61,31 @@ class Chapter(TypedDict):
     body_opening: NotRequired[str]
 
 
+class Section(TypedDict):
+    """One part of the book in reading order: front matter, a chapter, a part page, back matter.
+
+    Unlike :class:`Chapter`, nothing is filtered out; ``kind`` says where the
+    section sits. ``opening`` is the first ``OPENING_WORDS`` words of body text
+    (headings left out), for transcript matching.
+    """
+
+    index: int
+    title: str
+    kind: Literal["front", "body", "back"]
+    word_count: int
+    opening: str
+
+
 class EpubResult(TypedDict):
-    """Return value of :func:`extract_epub`."""
+    """Return value of :func:`extract_epub`.
+
+    ``sections`` is absent in checkpoints from older versions.
+    """
 
     meta: EpubMeta
     cover: str | None
     chapters: list[Chapter]
+    sections: NotRequired[list[Section]]
 
 
 class ManifestItem(NamedTuple):
@@ -264,12 +283,16 @@ def extract_epub(epub_path: Path, work_dir: Path) -> EpubResult:
         chapters = _extract_chapters_via_blocklist(base, manifest, spine)
         logger.debug(f"{len(chapters)} chapters from the spine")
 
+    sections = _extract_sections(base, manifest, spine, root)
+    logger.debug(f"{len(sections)} sections in reading order")
+
     if cover_path is None:
         logger.debug("no cover image found")
     return {
         "meta": meta,
         "cover": str(cover_path) if cover_path else None,
         "chapters": chapters,
+        "sections": sections,
     }
 
 
@@ -510,6 +533,67 @@ def _extract_chapters_via_toc(
 
     chapters.sort(key=lambda c: c["n"])
     return chapters
+
+
+def _extract_sections(
+    base: Path,
+    manifest: dict[str, ManifestItem],
+    spine: list[str],
+    root: etree._Element,
+) -> list[Section]:
+    """Every part of the book in reading order, front and back matter included.
+
+    A section starts at each TOC entry (numbered or not; the first entry for a
+    spine file wins, fragments are ignored) and runs to the next entry. Spine
+    files before the first entry, or every spine file when there is no TOC, are
+    a section each. Sections with a front/back-matter heading are ``front``
+    before the first other section and ``back`` after the last one.
+
+    Args:
+        base: Directory containing the OPF; manifest hrefs are relative to it.
+        manifest: Manifest items by id.
+        spine: Item ids in reading order.
+        root: Parsed OPF document.
+    """
+    hrefs = [manifest[idref].href for idref in spine if idref in manifest]
+    path_to_index = {href: i for i, href in enumerate(hrefs)}
+    starts: dict[int, str] = {}  # spine index -> TOC label
+    for entries in _toc_sources(root, manifest, base):
+        for label, href in entries:
+            idx = path_to_index.get(href)
+            if idx is not None and idx not in starts:
+                starts[idx] = label
+        if starts:
+            break
+    first = min(starts) if starts else len(hrefs)
+    bounds = sorted(set(starts) | set(range(first)))  # untitled spine files before the TOC
+    if not starts:
+        bounds = list(range(len(hrefs)))
+
+    raw: list[tuple[str, int, str, bool]] = []  # (title, words, opening, is_matter)
+    for k, start in enumerate(bounds):
+        end = bounds[k + 1] if k + 1 < len(bounds) else len(hrefs)
+        files = [base / h for h in hrefs[start:end] if (base / h).exists()]
+        if not files:
+            continue
+        heading, _ = _chapter_word_count(files[0])
+        title = starts.get(start) or heading
+        words = sum(_chapter_word_count(f)[1] for f in files)
+        opening = next((o for f in files if (o := _opening_text(f))), "")
+        matter = _is_front_back_matter(title) or (bool(heading) and _is_front_back_matter(heading))
+        raw.append((title, words, opening, matter))
+
+    story = [i for i, r in enumerate(raw) if not r[3]]
+    lo, hi = (story[0], story[-1]) if story else (len(raw), -1)
+    sections: list[Section] = []
+    for i, (title, words, opening, matter) in enumerate(raw):
+        kind: Literal["front", "body", "back"] = (
+            "front" if matter and i < lo else "back" if matter and i > hi else "body"
+        )
+        sections.append(
+            {"index": i, "title": title, "kind": kind, "word_count": words, "opening": opening}
+        )
+    return sections
 
 
 def _extract_chapters_via_blocklist(

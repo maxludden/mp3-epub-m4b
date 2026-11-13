@@ -212,3 +212,68 @@ def synthetic_book(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path
     duration = make_audio(mp3)
     make_epub(epub)
     return mp3, epub, duration
+
+
+# Distinct first sentences (12 words each) so transcript matching can tell the chapters apart.
+ANCHORED_OPENINGS = [
+    "Morning fog rolled across the harbour while the fishermen mended their torn nets",
+    "Tom chased the grey cat through the kitchen and knocked over every pot",
+    "Fate arrived on a Tuesday wearing a borrowed coat and carrying three letters",
+]
+FRONT_MATTER = [("Title Page", 8), ("Copyright", 30)]
+BACK_MATTER = [("About the Author", 60)]
+
+
+def _xhtml(title: str, body: str) -> str:
+    return (
+        "<html xmlns='http://www.w3.org/1999/xhtml'><body>"
+        f"<h1>{title.replace('&', '&amp;')}</h1><p>{body}</p></body></html>"
+    )
+
+
+def make_epub_with_matter(path: Path, with_nav: bool = True) -> None:
+    """Write an EPUB 3 with front matter, the three ``CHAPTERS`` and back matter, all in the TOC.
+
+    Each chapter's text starts with its ``ANCHORED_OPENINGS`` sentence and has
+    ``seconds * WORDS_PER_SECOND`` body words in total.
+    """
+    sections: list[tuple[str, str]] = []
+    for title, n in FRONT_MATTER:
+        sections.append((title, " ".join(["front"] * n)))
+    for opening, ch in zip(ANCHORED_OPENINGS, CHAPTERS, strict=True):
+        filler = int(ch.seconds * WORDS_PER_SECOND) - len(opening.split())
+        sections.append((ch.title, f"{opening} {'word ' * filler}".strip()))
+    for title, n in BACK_MATTER:
+        sections.append((title, " ".join(["back"] * n)))
+    files: dict[str, str] = {}
+    items, spine, links = [], [], []
+    for k, (title, body) in enumerate(sections):
+        files[f"OEBPS/s{k}.xhtml"] = _xhtml(title, body)
+        items.append(f'<item id="s{k}" href="s{k}.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="s{k}"/>')
+        links.append(f'<li><a href="s{k}.xhtml">{title.replace("&", "&amp;")}</a></li>')
+    if with_nav:
+        items.append(
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'
+        )
+        files["OEBPS/nav.xhtml"] = (
+            "<html xmlns='http://www.w3.org/1999/xhtml' xmlns:epub='http://www.idpf.org/2007/ops'><body>"
+            f"<nav epub:type='toc'><ol>{''.join(links)}</ol></nav></body></html>"
+        )
+    files["OEBPS/content.opf"] = (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        "<package xmlns='http://www.idpf.org/2007/opf' version='3.0'>"
+        "<metadata xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+        "<dc:title>Fish &amp; Chips: A Test</dc:title><dc:creator>Ann Author</dc:creator></metadata>"
+        f"<manifest>{''.join(items)}</manifest><spine>{''.join(spine)}</spine></package>"
+    )
+    files["META-INF/container.xml"] = (
+        "<?xml version='1.0'?><container version='1.0' "
+        "xmlns='urn:oasis:names:tc:opendocument:xmlns:container'><rootfiles>"
+        "<rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/>"
+        "</rootfiles></container>"
+    )
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        for name, data in files.items():
+            zf.writestr(name, data)

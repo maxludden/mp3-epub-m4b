@@ -61,14 +61,23 @@
 
 ```python
 def test_sections_include_front_and_back_matter(tmp_path: Path) -> None:
-    epub = tmp_path / "b.epub"; make_epub_with_matter(epub)
+    epub = tmp_path / "b.epub"
+    make_epub_with_matter(epub)
     res = extract_epub(epub, tmp_path / "x")
     secs = res["sections"]
-    assert [s["title"] for s in secs] == ["Title Page", "Copyright", "First Light", "Tom & Jerry", "Fate = Doom; #3", "About the Author"]
+    assert [s["title"] for s in secs] == [
+        "Title Page",
+        "Copyright",
+        "First Light",
+        "Tom & Jerry",
+        "Fate = Doom; #3",
+        "About the Author",
+    ]
     assert [s["kind"] for s in secs] == ["front", "front", "body", "body", "body", "back"]
     assert secs[2]["opening"].startswith(ANCHORED_OPENINGS[0][:20])
     assert secs[3]["word_count"] == 600
     assert len(res["chapters"]) == 3  # existing chapter list is unchanged
+
 
 def test_sections_without_toc_fall_back_to_spine_files(tmp_path: Path) -> None:
     # same book with nav removed: one section per spine file, titles from <h1>
@@ -116,30 +125,49 @@ A section spans the spine files from its TOC entry (all entries from `_toc_sourc
 
 ```python
 def test_clips_from_gaps():
-    assert clips_from_gaps([32.0, 48.8], 150.0) == [Clip(0, 0.0, 32.0), Clip(1, 32.0, 48.8), Clip(2, 48.8, 150.0)]
+    assert clips_from_gaps([32.0, 48.8], 150.0) == [
+        Clip(0, 0.0, 32.0),
+        Clip(1, 32.0, 48.8),
+        Clip(2, 48.8, 150.0),
+    ]
 
-def test_find_start_skips_opening_credits():           # Review Focus 2
-    heard = {0: speak("this is audible ann author fish and chips narrated by", 0), 1: speak(OPEN[0], 32)}
+
+def test_find_start_skips_opening_credits():  # Review Focus 2
+    heard = {
+        0: speak("this is audible ann author fish and chips narrated by", 0),
+        1: speak(OPEN[0], 32),
+    }
     a = find_start(heard, clips, SECTIONS)  # SECTIONS = title, copyright, ch1..3, about
     assert (a.clip, a.section) == (1, 2)
 
-def test_find_start_none_when_nothing_matches(): assert find_start({0: speak("music", 0)}, clips, SECTIONS) is None
+
+def test_find_start_none_when_nothing_matches():
+    assert find_start({0: speak("music", 0)}, clips, SECTIONS) is None
+
 
 def test_find_end_matches_final_sections_in_reverse():
     heard = {5: speak(OPEN[2], 900)}
     assert (find_end(heard, clips6, SECTIONS, rate=0.1).section) == 4
+
 
 def test_find_end_uses_expected_position_when_last_clips_are_mid_chapter():  # Review Focus 1
     # 8 clips, last 5 are scene breaks inside ch3; clip 2 starts ch3 near total_dur - 400*rate
     a = find_end(heard_with_ch3_at_clip2, clips8, SECTIONS, rate=0.1)
     assert (a.clip, a.section) == (2, 4)
 
+
 def test_confirm_candidates_adds_expected_clip():
-    assert confirm_candidates(Anchor(1, 2, .9), 1, clips10, expected_time=clips10[7].start) == [2, 3, 4, 7]
+    assert confirm_candidates(Anchor(1, 2, 0.9), 1, clips10, expected_time=clips10[7].start) == [
+        2,
+        3,
+        4,
+        7,
+    ]
+
 
 def test_confirms_and_next_narrated():
     assert confirms({3: speak(OPEN[1], 60)}, [2, 3], SECTIONS[3]) == 3
-    assert next_narrated(SECTIONS_WITH_PART_PAGE, 2, 1) == 4   # 20-word "Part Two" at 3 is skipped
+    assert next_narrated(SECTIONS_WITH_PART_PAGE, 2, 1) == 4  # 20-word "Part Two" at 3 is skipped
 ```
 
 - [ ] **Step 2: Run, expect FAIL** (`ModuleNotFoundError: mp3_epub_m4b.anchors`). Run: `uv run pytest tests/test_anchors.py -v`
@@ -205,10 +233,12 @@ def test_confirms_and_next_narrated():
 ```python
 def test_length_outliers_need_both_tolerances():
     # rate 0.1 s/word: expected 100 s, 100 s, 1000 s, 1000 s
-    segs = [seg(1, dur=100, words=1000),    # exact
-            seg(2, dur=112, words=1000),    # 12% off but only 12 s -> within slack
-            seg(3, dur=1080, words=10000),  # 80 s off but only 8% -> within 10%
-            seg(4, dur=1300, words=10000)]  # 30% and 300 s -> flagged
+    segs = [
+        seg(1, dur=100, words=1000),  # exact
+        seg(2, dur=112, words=1000),  # 12% off but only 12 s -> within slack
+        seg(3, dur=1080, words=10000),  # 80 s off but only 8% -> within 10%
+        seg(4, dur=1300, words=10000),
+    ]  # 30% and 300 s -> flagged
     assert length_outliers(segs, rate=0.1) == [4]
 ```
 ```python

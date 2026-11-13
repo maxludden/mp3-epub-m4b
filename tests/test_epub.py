@@ -9,7 +9,13 @@ import pytest
 
 from mp3_epub_m4b.epub_extract import extract_epub
 
-from .conftest import CHAPTERS, WORDS_PER_SECOND, make_epub
+from .conftest import (
+    ANCHORED_OPENINGS,
+    CHAPTERS,
+    WORDS_PER_SECOND,
+    make_epub,
+    make_epub_with_matter,
+)
 
 
 @pytest.mark.ffmpeg
@@ -111,3 +117,20 @@ def test_spine_fallback_attaches_epigraphs_and_stops_at_back_matter(tmp_path: Pa
     assert "body_opening" not in chapters[0]  # never borrow the praise page for chapter 1
     assert chapters[1]["opening"].startswith("If men read these words")
     assert chapters[1]["body_opening"].startswith("SECOND chapter")
+
+
+SECTION_TITLES = ["Title Page", "Copyright", *[ch.title for ch in CHAPTERS], "About the Author"]
+
+
+@pytest.mark.parametrize("with_nav", [True, False])
+def test_sections_include_front_and_back_matter(tmp_path: Path, with_nav: bool) -> None:
+    epub = tmp_path / "b.epub"
+    make_epub_with_matter(epub, with_nav=with_nav)
+    res = extract_epub(epub, tmp_path / "x")
+    secs = res["sections"]
+    assert [s["title"] for s in secs] == SECTION_TITLES
+    assert [s["index"] for s in secs] == list(range(6))
+    assert [s["kind"] for s in secs] == ["front", "front", "body", "body", "body", "back"]
+    assert secs[2]["opening"].startswith(ANCHORED_OPENINGS[0])
+    assert abs(secs[3]["word_count"] - CHAPTERS[1].seconds * WORDS_PER_SECOND) < 10
+    assert len(res["chapters"]) == 3  # the chapter list used by the other modes is unchanged
