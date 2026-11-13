@@ -8,6 +8,9 @@
 - [ffmpeg](https://ffmpeg.org) (with `ffprobe`)
 - [uv](https://docs.astral.sh/uv/) and Python 3.12+
 - Node 24+, only for the readaloud EPUB step (`--no-readaloud` skips it)
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (`brew install whisper-cpp`) and a GGML
+  model such as `ggml-base.en.bin` in `~/.cache/whisper-models`: needed by the default
+  `--align-by anchored` (and by `transcribe`); `--align-by silence` works without it
 
 ## Setup
 

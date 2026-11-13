@@ -10,9 +10,9 @@ scene breaks) with `--fresh`. If the credits at the start or end are the culprit
 
 **Chapters placed by guess, "ran out of audio", or many lengths far from the word counts.**
 The recording may have no pause between chapters: some are joined by music, a spoken "Part 2
-of 3", or nothing at all, so silence can't find them. With whisper.cpp installed,
-`--align-by auto` (the default) notices and switches to transcript placement by itself; you
-can also force it with `--align-by transcribe --fresh`. In the `--dry-run` table, rows noted
+of 3", or nothing at all, so silence can't find them. The default `anchored` mode asks you
+about each chapter whose length doesn't fit; when there are many, `--align-by transcribe
+--fresh` places every chapter by its opening words instead. In the `--dry-run` table, rows noted
 `unmatched` are chapters whose opening words were never heard: they are placed by
 interpolation, so check them against the audio.
 
@@ -32,6 +32,18 @@ error).** The EPUB has more chapters than the audio, or the two are different ed
 (if the audio has no pause between chapters, see the entry above).
 For a readaloud failure the M4B is already delivered; fix the cause (Node 24+, enough
 disk) and re-run to resume at the alignment, or pass `--no-readaloud`.
+
+**"waiting for input" / exit status 3.** The start or end of the book couldn't be
+confirmed, or a chapter's length doesn't fit its text, and there was no terminal to ask in.
+Run `mp3-epub-m4b resolve AUDIO` in a terminal to listen to the clip and pick; the
+conversion then carries on. If the same book keeps asking about the start, its audio may
+open with long credits or a preview: pick the section the narrator begins in, or use "None
+of these" to hear the next clip.
+
+**"no whisper model found" / "whisper.cpp not found".** The default mode transcribes a few
+10-second clips. Install whisper.cpp (`brew install whisper-cpp`) and put a model such as
+`ggml-base.en.bin` in `~/.cache/whisper-models` (or pass `--whisper-model`), or use
+`--align-by silence`.
 
 **"was made for different input/options".** Saved progress belongs to other files or
 settings. Re-run with the original settings, or add `--fresh`.

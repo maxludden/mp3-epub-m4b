@@ -3,9 +3,10 @@
 # mp3+epub=m4b
 
 Turns a single-file audiobook (`.mp3` / `.m4a`) plus its EPUB into a chaptered
-`.m4b` with accurate chapter boundaries (detected from silence gaps in the audio,
-anchored chapter-by-chapter so they can't drift), embedded cover art, and
-optionally the opening/end credits split into their own chapters.
+`.m4b` with accurate chapter boundaries, embedded cover art, and optionally the
+opening/end credits split into their own chapters. The start and end of the book are
+found and confirmed from what the narrator says, every chapter is length-checked against
+its text, and you're asked when something doesn't fit — before anything is encoded.
 
 ## Quick start
 

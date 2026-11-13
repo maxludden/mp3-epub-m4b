@@ -11,14 +11,15 @@
 - `--detect-intro` / `--detect-outro` — split opening / end credits into their own
   chapters. Off by default: auto-detection can misfire, and a false positive shifts every
   later chapter, so check the result with `--dry-run`.
-- `--align-by auto|silence|transcribe` — how chapters are placed. `auto` (the default) tries
-  silence first and switches to `transcribe` when silence fails or looks unreliable (chapters
-  placed by guess, or many far from the length their word count predicts). `transcribe`
-  listens instead: it transcribes a window around where each chapter should start and finds
-  the chapter's opening words (epigraph included) in it, so it works when nothing separates
-  chapters. It needs whisper.cpp and takes roughly 15 minutes for a 20-hour book. `silence`
-  never transcribes. Without whisper.cpp, `auto` behaves exactly like `silence`.
-- `--whisper-model` — GGML model for `transcribe` (default: the first `ggml-*.en.bin` in
+- `--align-by anchored|silence|transcribe|auto` — how chapters are placed. `anchored` (the
+  default) confirms the start and end of the book by transcript, places chapters at silences
+  between them, length-checks every chapter and asks when something doesn't fit (see "How
+  chapters are found"). `silence` places chapters at silences only and never asks.
+  `transcribe` transcribes a window around where each chapter should start and finds its
+  opening words, for recordings with no pause between chapters (roughly 15 minutes for a
+  20-hour book). `auto` tries silence first and switches to `transcribe` when silence looks
+  unreliable. `anchored` and `transcribe` need whisper.cpp.
+- `--whisper-model` — GGML model for `anchored`/`transcribe` (default: the first `ggml-*.en.bin` in
   `~/.cache/whisper-models` or `~/.cache/whisper.cpp`; also `MP3_EPUB_M4B_WHISPER_MODEL`).
 - `--min-gap`, `--bitrate`, `--overwrite`, `--fresh` — see `--help`.
 - `--readaloud / --no-readaloud` — after delivery, align the M4B with the EPUB into an

@@ -28,3 +28,8 @@ chapters without asking or encoding.
 Unmatched files are reported and skipped, and the batch stops if free disk space
 drops below 8 GB. `./convert-batch.sh` is an optional wrapper.
 
+A batch never stops to ask. A book that needs a decision is left waiting (nothing
+encoded), the next book starts, and the summary lists a `mp3-epub-m4b resolve` command for
+each waiting book (the batch then exits with status 3). `mp3-epub-m4b status` shows them
+as "waiting for input".
+
