@@ -326,3 +326,16 @@ def test_status_command_by_audio_file_work_folder_and_default(tmp_path: Path) ->
 
     empty = runner.invoke(app, ["status", "--work-dir", str(tmp_path / "empty")])
     assert empty.exit_code == 0 and "No conversions" in empty.output
+
+
+def test_a_book_waiting_for_input(tmp_path: Path) -> None:
+    question = {"kind": "start", "prompt": "Where does the book start?", "choices": []}
+    work = make_book(tmp_path / "book", pending_question=question, job={"audio": "/books/Book.mp3"})
+    write_progress(work)
+    st = read_status(work, now=1200.0, alive=lambda pid: False)
+    assert st is not None and st.waiting_for_input and st.question == "Where does the book start?"
+    text = render(render_status(st))
+    assert "waiting for input: Where does the book start?" in text
+    assert 'mp3-epub-m4b resolve "/books/Book.mp3"' in text
+    assert "not running" not in text
+    assert "waiting" in render(render_overview([st]))

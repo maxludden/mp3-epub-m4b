@@ -212,6 +212,9 @@ class BookStatus:
         idle: Seconds since the last progress update.
         output: Delivered M4B path, once done.
         warnings: Notes the reader wants to surface (for example, a stale record).
+        waiting_for_input: Anchored alignment stopped on a question only a person can answer.
+        question: That question's prompt.
+        resolve_target: The file to pass to ``mp3-epub-m4b resolve``.
     """
 
     work_dir: Path
@@ -236,6 +239,9 @@ class BookStatus:
     idle: float | None = None
     output: str | None = None
     warnings: list[str] = field(default_factory=list)
+    waiting_for_input: bool = False
+    question: str = ""
+    resolve_target: str = ""
 
     @property
     def fraction(self) -> float | None:
@@ -334,6 +340,7 @@ def read_status(
         except OSError:
             pass
 
+    pending = state.get("pending_question")
     warnings: list[str] = []
     running: bool | None = None
     pid = idle = elapsed = None
@@ -374,6 +381,9 @@ def read_status(
         idle=idle,
         output=state.get("final_output"),
         warnings=warnings,
+        waiting_for_input=pending is not None,
+        question=pending["prompt"] if pending else "",
+        resolve_target=state.get("job", {}).get("audio", "") or str(work_dir),
     )
 
 
@@ -449,7 +459,11 @@ def render_status(st: BookStatus) -> RenderableType:
         if timing:
             parts.append(highlighted("  ·  ".join(timing), "dim"))
     if st.chapters_total and st.stage in {"align", "assemble", "deliver", "readaloud", "done"}:
-        how = {"transcribe": "by transcript", "silence": "by silence"}.get(st.method, "")
+        how = {
+            "transcribe": "by transcript",
+            "silence": "by silence",
+            "anchored": "between confirmed start and end",
+        }.get(st.method, "")
         bits = [f"{st.chapters_placed}/{st.chapters_total} chapters placed {how}".strip()]
         if st.unmatched:
             bits.append(f"{len(st.unmatched)} unmatched ({', '.join(map(str, st.unmatched))})")
@@ -467,7 +481,10 @@ def render_status(st: BookStatus) -> RenderableType:
         for p in st.recent:
             table.add_row(str(p.n), p.title, _clock(p.start), p.note)
         parts.append(table)
-    if st.running is not None and st.stage != "done":
+    if st.waiting_for_input:
+        parts.append(highlighted(f"waiting for input: {st.question}", "bold yellow"))
+        parts.append(highlighted(f'answer it with: mp3-epub-m4b resolve "{st.resolve_target}"'))
+    elif st.running is not None and st.stage != "done":
         if st.running:
             ago = f", updated {fmt_duration(st.idle)} ago" if st.idle is not None else ""
             parts.append(highlighted(f"running (pid {st.pid}{ago})", "green"))
@@ -492,7 +509,9 @@ def render_overview(statuses: list[BookStatus]) -> RenderableType:
     for st in statuses:
         pct = f"{st.fraction:.0%}" if st.fraction is not None else ""
         state = (
-            "finished"
+            "waiting for input"
+            if st.waiting_for_input
+            else "finished"
             if st.stage == "done"
             else "running"
             if st.running
