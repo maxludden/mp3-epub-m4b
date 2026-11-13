@@ -145,6 +145,8 @@ FRONT_BACK_MATTER_PREFIXES = (
 OPENING_WORDS = 40  # how much of a chapter's start to keep for transcript matching
 LEAD_MIN_WORDS = 15  # shorter files are stubs ("PART THREE"), not narrated epigraphs
 LEAD_MAX_WORDS = 200  # at or above this a file is a chapter in its own right
+MIN_TOC_FOR_SHORTFALL = 4  # smaller TOCs are too short to judge
+SECTION_SHORTFALL = 0.5  # warn when sections are at most this share of the TOC entries
 
 NUMBERED_RE = re.compile(r"^\s*(?:chapter\s+)?(\d+)\s*[\.\):\-–—]\s*(.+?)\s*$", re.I)
 
@@ -558,11 +560,13 @@ def _extract_sections(
     hrefs = [manifest[idref].href for idref in spine if idref in manifest]
     path_to_index = {href: i for i, href in enumerate(hrefs)}
     starts: dict[int, str] = {}  # spine index -> TOC label
+    toc_entries = 0  # entries of the TOC used that point at a spine file
     for entries in _toc_sources(root, manifest, base):
         for label, href in entries:
             idx = path_to_index.get(href)
-            if idx is not None and idx not in starts:
-                starts[idx] = label
+            if idx is not None:
+                toc_entries += 1
+                starts.setdefault(idx, label)
         if starts:
             break
     first = min(starts) if starts else len(hrefs)
@@ -597,7 +601,26 @@ def _extract_sections(
         sections.append(
             {"index": i, "title": title, "kind": kind, "word_count": words, "opening": opening}
         )
+    _warn_if_sections_merged(toc_entries, len(sections))
     return sections
+
+
+def _warn_if_sections_merged(toc_entries: int, n_sections: int) -> None:
+    """Warn when TOC entries share files, so several chapters became one section.
+
+    Sections are cut at file boundaries; entries that link to ``#anchors``
+    inside one file (typical of single-file EPUBs) collapse into one section,
+    and the chapters inside it can't be told apart.
+    """
+    if toc_entries < MIN_TOC_FOR_SHORTFALL or n_sections > toc_entries * SECTION_SHORTFALL:
+        return
+    logger.warning(
+        f"the table of contents has {toc_entries} entries but they point into so few files "
+        f"that only {n_sections} section{'' if n_sections == 1 else 's'} could be found: "
+        "chapters that share a file can't be told apart, so finding the start and end of "
+        "the book and checking chapter lengths will be unreliable. Re-export the EPUB with "
+        "one file per chapter (for example with Calibre), or check the chapters with --dry-run."
+    )
 
 
 def _extract_chapters_via_blocklist(

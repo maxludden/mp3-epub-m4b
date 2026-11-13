@@ -141,3 +141,24 @@ def test_a_sample_of_the_next_book_after_back_matter_is_back_matter(tmp_path: Pa
     make_epub_with_matter(epub, sample=True)
     secs = extract_epub(epub, tmp_path / "x")["sections"]
     assert secs[-1]["title"] == "Next Book: Chapter 1" and secs[-1]["kind"] == "back"
+
+
+def test_warns_when_the_toc_points_into_far_fewer_files(
+    tmp_path: Path, logs: list[tuple[str, str]]
+) -> None:
+    epub = tmp_path / "b.epub"
+    make_epub_with_matter(epub, single_file=True)
+    secs = extract_epub(epub, tmp_path / "x")["sections"]
+    assert len(secs) == 1
+    warnings = [m for level, m in logs if level == "warning" and "point into" in m]
+    assert len(warnings) == 1
+    assert "6 entries" in warnings[0] and "1 section" in warnings[0]
+
+
+def test_no_section_warning_when_each_toc_entry_has_its_own_file(
+    tmp_path: Path, logs: list[tuple[str, str]]
+) -> None:
+    epub = tmp_path / "b.epub"
+    make_epub_with_matter(epub)
+    extract_epub(epub, tmp_path / "x")
+    assert not [m for level, m in logs if level == "warning" and "point into" in m]

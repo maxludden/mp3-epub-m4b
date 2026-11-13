@@ -231,11 +231,14 @@ def _xhtml(title: str, body: str) -> str:
     )
 
 
-def make_epub_with_matter(path: Path, with_nav: bool = True, sample: bool = False) -> None:
+def make_epub_with_matter(
+    path: Path, with_nav: bool = True, sample: bool = False, single_file: bool = False
+) -> None:
     """Write an EPUB 3 with front matter, the three ``CHAPTERS`` and back matter, all in the TOC.
 
     Each chapter's text starts with its ``ANCHORED_OPENINGS`` sentence and has
-    ``seconds * WORDS_PER_SECOND`` body words in total.
+    ``seconds * WORDS_PER_SECOND`` body words in total. With ``single_file`` the
+    whole book is one XHTML file and the TOC links to ``#fragment`` anchors in it.
     """
     sections: list[tuple[str, str]] = []
     for title, n in FRONT_MATTER:
@@ -249,11 +252,23 @@ def make_epub_with_matter(path: Path, with_nav: bool = True, sample: bool = Fals
         sections.append(("Next Book: Chapter 1", " ".join(["preview"] * 400)))
     files: dict[str, str] = {}
     items, spine, links = [], [], []
+    if single_file:
+        parts = "".join(
+            f"<h1 id='s{k}'>{title.replace('&', '&amp;')}</h1><p>{body}</p>"
+            for k, (title, body) in enumerate(sections)
+        )
+        files["OEBPS/book.xhtml"] = (
+            f"<html xmlns='http://www.w3.org/1999/xhtml'><body>{parts}</body></html>"
+        )
+        items.append('<item id="book" href="book.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append('<itemref idref="book"/>')
     for k, (title, body) in enumerate(sections):
-        files[f"OEBPS/s{k}.xhtml"] = _xhtml(title, body)
-        items.append(f'<item id="s{k}" href="s{k}.xhtml" media-type="application/xhtml+xml"/>')
-        spine.append(f'<itemref idref="s{k}"/>')
-        links.append(f'<li><a href="s{k}.xhtml">{title.replace("&", "&amp;")}</a></li>')
+        if not single_file:
+            files[f"OEBPS/s{k}.xhtml"] = _xhtml(title, body)
+            items.append(f'<item id="s{k}" href="s{k}.xhtml" media-type="application/xhtml+xml"/>')
+            spine.append(f'<itemref idref="s{k}"/>')
+        href = f"book.xhtml#s{k}" if single_file else f"s{k}.xhtml"
+        links.append(f'<li><a href="{href}">{title.replace("&", "&amp;")}</a></li>')
     if with_nav:
         items.append(
             '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'

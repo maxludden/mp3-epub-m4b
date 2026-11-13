@@ -40,6 +40,13 @@ conversion then carries on. If the same book keeps asking about the start, its a
 open with long credits or a preview: pick the section the narrator begins in, or use "None
 of these" to hear the next clip.
 
+**"the table of contents has N entries but they point into so few files…".** The EPUB
+keeps several chapters in one file (often the whole book in one), and its table of
+contents links to places inside that file. Sections are cut at file boundaries, so those
+chapters merge into one and the default mode can't find the start and end of the book or
+check chapter lengths reliably. Re-export the EPUB with one file per chapter (for example
+with Calibre), or check the chapter table with `--dry-run` before converting.
+
 **"no whisper model found" / "whisper.cpp not found".** The default mode transcribes a few
 10-second clips. Install whisper.cpp (`brew install whisper-cpp`) and put a model such as
 `ggml-base.en.bin` in `~/.cache/whisper-models` (or pass `--whisper-model`), or use
