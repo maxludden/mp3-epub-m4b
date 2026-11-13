@@ -8,17 +8,24 @@ from mp3_epub_m4b.anchors import (
     Anchor,
     Clip,
     clips_from_gaps,
+    closest_chapters,
     confirm_candidates,
     confirms,
     edge_clips,
     end_probe_clips,
     find_end,
     find_start,
+    length_outliers,
+    narrated_chapters,
     next_narrated,
+    place_chapters,
     provisional_rate,
     section_score,
+    speaking_rate,
 )
+from mp3_epub_m4b.chapters import SilenceIndex
 from mp3_epub_m4b.epub_extract import Section
+from mp3_epub_m4b.state import Segment
 from mp3_epub_m4b.transcribe import Word
 
 from .conftest import ANCHORED_OPENINGS as OPEN
@@ -134,3 +141,85 @@ def test_confirms_and_next_narrated() -> None:
 def test_provisional_rate_counts_body_words_only() -> None:
     assert provisional_rate(SECTIONS, 130.0) == 0.1
     assert provisional_rate(SECTIONS[:2], 130.0) == 0.0
+
+
+# --------------------------------------------------------------- placement
+
+
+def seg(n: int, dur: float, words: int) -> Segment:
+    return {"n": n, "title": f"c{n}", "start": 0.0, "end": dur, "duration": dur, "words": words}
+
+
+def test_length_outliers_need_both_tolerances() -> None:
+    # rate 0.1 s/word: expected 100 s, 100 s, 1000 s, 1000 s
+    intro: Segment = {"n": 0, "title": "Opening Credits", "start": 0.0, "end": 9.0, "duration": 9.0}
+    segs = [
+        intro,
+        seg(1, dur=100, words=1000),  # exact
+        seg(2, dur=112, words=1000),  # 12% off but only 12 s -> within the slack
+        seg(3, dur=1080, words=10000),  # 80 s off but only 8% -> within 10%
+        seg(4, dur=1300, words=10000),  # 30% and 300 s -> flagged
+    ]
+    assert length_outliers(segs, rate=0.1) == [4]  # chapter numbers, the intro is not counted
+
+
+def test_narrated_chapters_merges_part_pages_and_drops_unnarrated() -> None:
+    part = sec(3, "Part Two", 20, "Part Two the long road")
+    shifted = [
+        sec(s["index"] + 1, s["title"], s["word_count"], s["opening"], s["kind"])
+        for s in SECTIONS[3:]
+    ]
+    chapters = narrated_chapters([*SECTIONS[:3], part, *shifted], 2, 5)
+    assert [(c["n"], c["title"], c["word_count"]) for c in chapters] == [
+        (1, "First Light", 300),
+        (2, "Tom & Jerry", 620),
+        (3, "Fate = Doom; #3", 400),
+    ]
+    assert chapters[1]["opening"].startswith(OPEN[1])
+
+
+def test_speaking_rate() -> None:
+    chapters = narrated_chapters(SECTIONS, 2, 4)
+    assert speaking_rate(chapters, 10.0, 140.0) == 0.1
+    assert speaking_rate([], 0.0, 10.0) == 0.0
+
+
+CHAPTERS3 = narrated_chapters(SECTIONS, 2, 4)  # 300, 600, 400 words
+
+
+def test_place_chapters_chains_gaps_between_fixed_ends() -> None:
+    silences = SilenceIndex([(30.0, 34.0), (47.0, 50.6), (103.6, 107.6)], 3.5)
+    p = place_chapters(
+        CHAPTERS3, silences, fixed={"1": 0.0, "3": 105.6}, rejected=[], total_dur=150.0, rate=0.11
+    )
+    assert p.boundaries == {"1": 0.0, "2": 32.0, "3": 105.6}
+    assert p.fallback == [] and p.low_confidence == [2]
+
+
+def test_place_chapters_skips_rejected_gaps() -> None:
+    # the person said 32 s is not a chapter start, so chapter 2 moves to the next gap
+    silences = SilenceIndex([(30.0, 34.0), (47.0, 50.6), (103.6, 107.6)], 3.5)
+    p = place_chapters(
+        CHAPTERS3,
+        silences,
+        fixed={"1": 0.0, "3": 105.6},
+        rejected=[32.0],
+        total_dur=150.0,
+        rate=0.11,
+    )
+    assert p.boundaries["2"] == 48.8
+
+
+def test_place_chapters_interpolates_when_no_gap_before_the_next_fixed_start() -> None:
+    silences = SilenceIndex([(120.0, 124.0)], 3.5)
+    p = place_chapters(
+        CHAPTERS3, silences, fixed={"1": 0.0, "3": 90.0}, rejected=[], total_dur=150.0, rate=0.1
+    )
+    assert p.fallback == [2]
+    assert p.boundaries["2"] == 30.0  # 90 s split 300:600 by the words of chapters 1 and 2
+
+
+def test_closest_chapters_by_expected_start() -> None:
+    chapters = narrated_chapters(SECTIONS, 2, 4)  # expected starts 0, 30, 90 at 0.1 s/word
+    assert closest_chapters(85.0, chapters, 0.0, 0.1, k=2) == [2, 3]
+    assert closest_chapters(0.0, chapters, 0.0, 0.1) == [1, 2, 3]
