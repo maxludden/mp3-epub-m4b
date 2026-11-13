@@ -15,9 +15,11 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from mp3_epub_m4b import mcp_server
 from mp3_epub_m4b.mcp_server import (
+    answer_question,
     conversion_status,
     find_pairs,
     mcp,
+    pending_question,
     start_conversion,
     summarize_segments,
     summarize_state,
@@ -45,7 +47,14 @@ def book(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_registered_tools() -> None:
     names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert names == {"find_pairs", "start_conversion", "conversion_status", "verify_m4b"}
+    assert names == {
+        "find_pairs",
+        "start_conversion",
+        "conversion_status",
+        "pending_question",
+        "answer_question",
+        "verify_m4b",
+    }
 
 
 def test_find_pairs(tmp_path: Path) -> None:
@@ -85,6 +94,7 @@ def test_start_conversion_spawns_detached_cli(
     assert cmd[1:4] == ["-m", "mp3_epub_m4b.cli", "convert"]
     assert str(audio.resolve()) in cmd and str(epub.resolve()) in cmd
     assert {"--dry-run", "--fresh"} <= set(cmd)
+    assert cmd[cmd.index("--align-by") + 1] == "anchored"
     assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["start_new_session"] is True
     assert result["pid"] == 4242
     assert Path(result["work_dir"]) == work_root / "Book"
@@ -195,3 +205,78 @@ def test_summarize_segments_edges_and_detail() -> None:
     full = summarize_segments(segs, detail=True)
     assert len(full["chapters"]) == 20 and "first_chapters" not in full
     assert "chapters" in summarize_segments(segs[:4])  # small books are just listed
+
+
+# ------------------------------------------------------- waiting questions
+
+
+def _waiting(work_root: Path, epub: Path) -> Path:
+    """Write a checkpoint waiting on a start question, plus a finished job record."""
+    from mp3_epub_m4b.anchors import Clip  # noqa: PLC0415
+    from mp3_epub_m4b.questions import start_question  # noqa: PLC0415
+
+    from .test_anchors import SECTIONS  # noqa: PLC0415
+
+    work = work_root / "Book"
+    work.mkdir(parents=True)
+    q = start_question(Clip(0, 0.0, 32.0), "tone", SECTIONS, None, work / "questions" / "start.wav")
+    state = {"stage": "align", "align": {"boundaries": {}, "next": 1, "low_confidence": [],
+             "fallback": [], "method": "anchored", "anchored": {}}, "pending_question": q}  # fmt: skip
+    (work / "state.json").write_text(json.dumps(state))
+    record, _ = mcp_server._job_files(epub)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps(
+            {"pid": 2**22 + 12345, "cmd": ["python", "-m", "x", "--fresh"], "dry_run": False}
+        )
+    )
+    return work
+
+
+def test_pending_question(book: tuple[Path, Path], work_root: Path) -> None:
+    audio, epub = book
+    assert pending_question(str(audio)) == {"waiting": False}
+    _waiting(work_root, epub)
+    q = pending_question(str(audio))
+    assert q["waiting"] is True and q["kind"] == "start"
+    assert q["choices"][0]["id"] == "section:2" and q["clip_path"].endswith("start.wav")
+    status = conversion_status(str(audio))
+    assert status["waiting_for_input"] is True and status["question"].startswith(
+        "Where does the book"
+    )
+
+
+def test_answer_question_saves_and_relaunches(
+    book: tuple[Path, Path], work_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio, epub = book
+    work = _waiting(work_root, epub)
+    launched: list[list[str]] = []
+
+    class FakeProc:
+        pid = 777
+
+    def fake_popen(cmd: list[str], **_k: Any) -> FakeProc:
+        launched.append(cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with pytest.raises(ToolError, match="not a choice"):
+        answer_question(str(audio), "section:99")
+    result = answer_question(str(audio), "section:2")
+    # --fresh would wipe the work folder, and the answer with it
+    assert result["pid"] == 777 and launched == [["python", "-m", "x"]]
+    state = json.loads((work / "state.json").read_text())
+    assert "pending_question" not in state
+    assert state["align"]["anchored"]["start"] == {"clip": 0, "section": 2, "confirmed": True}
+    with pytest.raises(ToolError, match="no question"):
+        answer_question(str(audio), "section:2")
+
+
+def test_answer_question_refuses_while_running(book: tuple[Path, Path], work_root: Path) -> None:
+    audio, epub = book
+    _waiting(work_root, epub)
+    record, _ = mcp_server._job_files(epub)
+    record.write_text(json.dumps({"pid": os.getpid(), "cmd": ["x"]}))
+    with pytest.raises(ToolError, match="still running"):
+        answer_question(str(audio), "section:2")

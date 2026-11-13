@@ -35,8 +35,9 @@ from mp3_epub_m4b.options import (
     DEFAULT_WORK,
 )
 from mp3_epub_m4b.pairing import find_epub, pair_folder
+from mp3_epub_m4b.questions import apply_answer
 from mp3_epub_m4b.run import work_name
-from mp3_epub_m4b.state import STAGES, PipelineState, Segment, read_state
+from mp3_epub_m4b.state import STAGES, PipelineState, Segment, read_state, write_state
 
 mcp = MCPServer(
     "mp3-epub-m4b",
@@ -44,7 +45,12 @@ mcp = MCPServer(
         "Convert single-file mp3/m4a audiobooks plus EPUBs into chaptered M4B files. "
         "Use find_pairs to see what a folder holds, start_conversion to begin (it returns "
         "immediately; conversions take a long time), then poll conversion_status. "
-        "Re-running start_conversion after an interruption resumes where it left off."
+        "The start and end of the book are confirmed and every chapter length-checked before "
+        "anything is encoded; when conversion_status reports waiting_for_input, call "
+        "pending_question, show the person what was heard and the numbered choices, open "
+        "clip_path in their audio player (you can't play audio), ask them to pick, then call "
+        "answer_question with the choice id. Re-running start_conversion after an "
+        "interruption resumes where it left off."
     ),
 )
 
@@ -123,6 +129,21 @@ def _chapter(seg: Segment) -> dict[str, Any]:
     }
 
 
+def _launch(cmd: list[str], epub: Path, dry_run: bool) -> dict[str, Any]:
+    """Start ``cmd`` detached, logging to the book's job log, and record the job."""
+    record, log = _job_files(epub)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("wb") as sink:
+        # stdin=DEVNULL: nothing may prompt. start_new_session: outlive this server.
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )  # fmt: skip
+    record.write_text(json.dumps({"pid": proc.pid, "cmd": cmd, "dry_run": dry_run}))
+    logger.info(f"started pid {proc.pid}: {' '.join(cmd[3:5])}")
+    return {"pid": proc.pid, "log": str(log)}
+
+
 def summarize_segments(segments: list[Segment], detail: bool = False) -> dict[str, Any]:
     """Condense the planned chapters into something worth sending to Claude.
 
@@ -164,6 +185,10 @@ def summarize_state(state: PipelineState, detail: bool = False) -> dict[str, Any
     for key in ("final_output", "readaloud_output"):
         if key in state:
             summary[key] = state[key]
+    pending = state.get("pending_question")
+    summary["waiting_for_input"] = pending is not None
+    if pending is not None:
+        summary["question"] = pending["prompt"]
     return summary
 
 
@@ -218,6 +243,7 @@ def start_conversion(
     bitrate: str = "96k",
     detect_intro: bool = False,
     detect_outro: bool = False,
+    align_by: str = "anchored",
 ) -> dict[str, Any]:
     """Start converting one audiobook in the background and return immediately.
 
@@ -236,7 +262,11 @@ def start_conversion(
         bitrate: AAC bitrate.
         detect_intro: Split opening credits into their own chapter.
         detect_outro: Split end credits into their own chapter.
+        align_by: ``anchored`` (default: confirm start and end, length-check chapters,
+            stop for a person's answer when needed), ``silence``, ``transcribe`` or ``auto``.
     """
+    if align_by not in ("anchored", "silence", "transcribe", "auto"):
+        raise ToolError(f"align_by must be anchored, silence, transcribe or auto, not {align_by!r}")
     audio_path = _resolve(audio, kind="audio file")
     if audio_path.suffix.lower() not in AUDIO_SUFFIXES:
         raise ToolError(f"audio must be one of {sorted(AUDIO_SUFFIXES)}: {audio_path.name}")
@@ -256,27 +286,19 @@ def start_conversion(
         "--readaloud" if readaloud else "--no-readaloud",
         "--detect-intro" if detect_intro else "--no-detect-intro",
         "--detect-outro" if detect_outro else "--no-detect-outro",
+        "--align-by", align_by,
     ]  # fmt: skip
     for flag, on in (("--overwrite", overwrite), ("--fresh", fresh), ("--dry-run", dry_run)):
         if on:
             cmd.append(flag)
 
-    record, log = _job_files(epub_path)
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("wb") as sink:
-        # stdin=DEVNULL: nothing may prompt. start_new_session: outlive this server.
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )  # fmt: skip
-    record.write_text(json.dumps({"pid": proc.pid, "cmd": cmd, "dry_run": dry_run}))
-    logger.info(f"started pid {proc.pid}: {audio_path.name}")
+    launched = _launch(cmd, epub_path, dry_run)
     return {
-        "pid": proc.pid,
+        "pid": launched["pid"],
         "epub": str(epub_path),
         "out_dir": str(out_dir),
         "work_dir": str(_work_root() / work_name(epub_path.stem)),
-        "log": str(log),
+        "log": launched["log"],
     }
 
 
@@ -303,6 +325,66 @@ def conversion_status(book: str, detail: bool = False) -> dict[str, Any]:
     except (OSError, ValueError):
         status["stage"] = None  # not started yet, or the first checkpoint isn't written
     return status
+
+
+def _state_path(book: str) -> tuple[Path, Path]:
+    epub = _epub_for(_resolve(book, kind="book"))
+    return epub, _work_root() / work_name(epub.stem) / "state.json"
+
+
+@mcp.tool()
+def pending_question(book: str) -> dict[str, Any]:
+    """The question a conversion is waiting on, if any.
+
+    Show the person ``prompt``, what was ``heard``, and the numbered ``choices``
+    (mark ``suggested``), and open ``clip_path`` (a short WAV) in their audio
+    player so they can listen. Then pass the chosen ``id`` to answer_question.
+
+    Args:
+        book: The audio file or EPUB of the book.
+    """
+    _, state_path = _state_path(book)
+    try:
+        state = read_state(state_path)
+    except (OSError, ValueError):
+        return {"waiting": False}
+    pending = state.get("pending_question")
+    if pending is None:
+        return {"waiting": False}
+    return {"waiting": True, **pending}
+
+
+@mcp.tool()
+def answer_question(book: str, choice: str) -> dict[str, Any]:
+    """Answer the question a conversion is waiting on, and restart it from where it stopped.
+
+    Args:
+        book: The audio file or EPUB of the book.
+        choice: The ``id`` of the picked choice from pending_question.
+    """
+    epub, state_path = _state_path(book)
+    job = _read_job(epub)
+    if job is not None and _pid_alive(job["pid"]):
+        raise ToolError(f"{epub.stem} is still running (pid {job['pid']}); wait for it to stop")
+    try:
+        state = read_state(state_path)
+    except (OSError, ValueError) as e:
+        raise ToolError(f"no conversion found for {epub.stem}") from e
+    question = state.get("pending_question")
+    align = state.get("align")
+    if question is None or align is None:
+        raise ToolError(f"{epub.stem} has no question waiting for an answer")
+    try:
+        apply_answer(align.setdefault("anchored", {}), question, choice)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    del state["pending_question"]
+    write_state(state_path, state)
+    if job is None or not job.get("cmd"):
+        return {"answered": choice, "note": "no job to restart; call start_conversion"}
+    cmd = [a for a in job["cmd"] if a != "--fresh"]  # --fresh would wipe the answer
+    launched = _launch(cmd, epub, bool(job.get("dry_run")))
+    return {"answered": choice, **launched}
 
 
 @mcp.tool()
