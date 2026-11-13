@@ -96,6 +96,10 @@ class SilenceIndex:
         logger.debug(f"no gap found after {after:.1f}s ({skipped} too early)")
         return None, "fallback", skipped
 
+    def chapter_gaps(self) -> list[float]:
+        """Midpoints of every silence long enough to be a chapter transition, in order."""
+        return [round((s + e) / 2, 3) for s, e in self.silences if e - s >= self.min_gap]
+
     def has_companion(self, k: int, gap_end: float) -> bool:
         """Whether a short companion silence follows silence ``k`` within 10 s of ``gap_end``."""
         window_end = gap_end + COMPANION_WINDOW

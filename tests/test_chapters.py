@@ -194,3 +194,8 @@ def test_silence_doubts_on_the_real_book_numbers() -> None:
     assert silence_doubts(40, [7], 8) is None  # one guess and 20% off-length is tolerated
     # A tiny book's deviation share means nothing.
     assert silence_doubts(3, [], 3) is None
+
+
+def test_chapter_gaps_are_midpoints_of_long_silences() -> None:
+    idx = SilenceIndex([(10.0, 14.0), (20.0, 21.0), (40.0, 43.6)], min_gap=3.5)
+    assert idx.chapter_gaps() == [12.0, 41.8]
